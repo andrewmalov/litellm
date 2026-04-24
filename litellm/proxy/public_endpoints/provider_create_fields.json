@@ -3229,5 +3229,71 @@
       }
     ],
     "default_model_placeholder": "cursor/claude-4-sonnet"
+  },
+  {
+    "provider": "TTK",
+    "provider_display_name": "TTK",
+    "litellm_provider": "ttk",
+    "credential_fields": [
+      {
+        "key": "api_base",
+        "label": "API Base",
+        "placeholder": "https://llmproxy.cloudttk.ru",
+        "tooltip": null,
+        "required": false,
+        "field_type": "text",
+        "options": null,
+        "default_value": "https://llmproxy.cloudttk.ru"
+      },
+      {
+        "key": "api_key",
+        "label": "API Key",
+        "placeholder": null,
+        "tooltip": null,
+        "required": true,
+        "field_type": "password",
+        "options": null,
+        "default_value": null
+      }
+    ],
+    "default_model_placeholder": "ttk/<model-name>"
+  },
+  {
+    "provider": "YANDEX",
+    "provider_display_name": "Yandex Cloud",
+    "litellm_provider": "yandex",
+    "credential_fields": [
+      {
+        "key": "api_base",
+        "label": "API Base",
+        "placeholder": "https://ai.api.cloud.yandex.net/v1",
+        "tooltip": null,
+        "required": false,
+        "field_type": "text",
+        "options": null,
+        "default_value": "https://ai.api.cloud.yandex.net/v1"
+      },
+      {
+        "key": "api_key",
+        "label": "API Key",
+        "placeholder": null,
+        "tooltip": null,
+        "required": true,
+        "field_type": "password",
+        "options": null,
+        "default_value": null
+      },
+      {
+        "key": "api_base_env",
+        "label": "OpenAI-Project (Folder ID)",
+        "placeholder": "b1g6gn8a96vs5notogve",
+        "tooltip": "Yandex Cloud folder ID for the OpenAI-Project header",
+        "required": false,
+        "field_type": "text",
+        "options": null,
+        "default_value": null
+      }
+    ],
+    "default_model_placeholder": "yandex/gpt://<folder_id>/aliceai-llm/latest"
   }
 ]
