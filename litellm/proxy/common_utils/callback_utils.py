@@ -1,5 +1,6 @@
-import copy
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Literal, Optional
+import copy
+import os
 
 import litellm
 from litellm import get_secret
@@ -50,6 +51,14 @@ def initialize_callbacks_on_proxy(
         LoggingCallbackManager,
     )
     from litellm.proxy.proxy_server import prisma_client
+
+    # Block external integrations if flag is set
+    if os.environ.get("LITELLM_DISABLE_EXTERNAL_INTEGRATIONS", "false").lower() == "true":
+        verbose_proxy_logger.warning(
+            f"{blue_color_code}External integrations are disabled. LITELLM_DISABLE_EXTERNAL_INTEGRATIONS=true. Callbacks={value} will not be initialized.{reset_color_code}"
+        )
+        litellm.callbacks = []
+        return
 
     verbose_proxy_logger.debug(f"{blue_color_code}initializing callbacks={value} on proxy{reset_color_code}")
     if isinstance(value, list):

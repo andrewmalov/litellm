@@ -14210,6 +14210,25 @@ async def update_config(
         if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
             raise HTTPException(status_code=403, detail="Only proxy admins can update config")
 
+        # Block callback configuration updates when external integrations are disabled
+        if os.environ.get("LITELLM_DISABLE_EXTERNAL_INTEGRATIONS", "false").lower() == "true":
+            if (
+                config_info.litellm_settings is not None
+                and (
+                    config_info.litellm_settings.success_callback is not None
+                    or config_info.litellm_settings.failure_callback is not None
+                )
+            ) or (
+                config_info.general_settings is not None
+                and config_info.general_settings.alerting is not None
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail=CommonProxyErrors.external_integrations_disabled.value,
+                )
+
+        import base64
+
         if prisma_client is None:
             raise Exception("No DB Connected")
 

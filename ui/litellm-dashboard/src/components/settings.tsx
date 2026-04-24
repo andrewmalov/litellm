@@ -216,6 +216,9 @@ const buildCallbackPayload = (formValues: Record<string, any>, callbackName: str
 };
 
 const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, premiumUser }) => {
+  // Check if external integrations are disabled
+  const externalIntegrationsDisabled = import.meta.env.VITE_DISABLE_EXTERNAL_INTEGRATIONS === "true";
+
   const [callbacks, setCallbacks] = useState<AlertingObject[]>([]);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [isModalVisible, setIsModalVisible] = useState(false);
@@ -571,46 +574,60 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
         <TabGroup>
           <TabList variant="line" defaultValue="1">
             <Tab value="1">Logging Callbacks</Tab>
-            <Tab value="2">CloudZero Cost Tracking</Tab>
-            <Tab value="2">Alerting Types</Tab>
-            <Tab value="3">Alerting Settings</Tab>
-            <Tab value="4">Email Alerts</Tab>
+            {!externalIntegrationsDisabled && (
+              <>
+                <Tab value="2">CloudZero Cost Tracking</Tab>
+                <Tab value="3">Alerting Types</Tab>
+                <Tab value="4">Alerting Settings</Tab>
+                <Tab value="5">Email Alerts</Tab>
+              </>
+            )}
           </TabList>
           <TabPanels>
-            <TabPanel>
-              <LoggingCallbacksTable
-                callbacks={callbacks}
-                availableCallbacks={allCallbacks}
-                onAdd={() => setShowAddCallbacksModal(true)}
-                onEdit={(cb) => {
-                  setSelectedEditCallback(cb);
-                  setShowEditCallback(true);
-                }}
-                onDelete={(cb) => handleDeleteCallback(cb)}
-                onTest={async (cb) => {
-                  try {
-                    await serviceHealthCheck(accessToken, cb.name);
-                    NotificationsManager.success("Health check triggered");
-                  } catch (error) {
-                    NotificationsManager.fromBackend(parseErrorMessage(error));
-                  }
-                }}
-              />
+            <TabPanel value="1">
+              {externalIntegrationsDisabled ? (
+                <Card>
+                  <Text className="my-2">
+                    External integrations are disabled. Set VITE_DISABLE_EXTERNAL_INTEGRATIONS=false to enable them.
+                  </Text>
+                </Card>
+              ) : (
+                <LoggingCallbacksTable
+                  callbacks={callbacks}
+                  availableCallbacks={allCallbacks}
+                  onAdd={() => setShowAddCallbacksModal(true)}
+                  onEdit={(cb) => {
+                    setSelectedEditCallback(cb);
+                    setShowEditCallback(true);
+                  }}
+                  onDelete={(cb) => handleDeleteCallback(cb)}
+                  onTest={async (cb) => {
+                    try {
+                      await serviceHealthCheck(accessToken, cb.name);
+                      NotificationsManager.success("Health check triggered");
+                    } catch (error) {
+                      NotificationsManager.fromBackend(parseErrorMessage(error));
+                    }
+                  }}
+                />
+              )}
             </TabPanel>
-            <TabPanel>
-              <div className="p-8">
-                <CloudZeroCostTracking />
-              </div>
-            </TabPanel>
-            <TabPanel>
-              <Card>
-                <Text className="my-2">
-                  Alerts are only supported for Slack Webhook URLs. Get your webhook urls from{" "}
-                  <a href="https://api.slack.com/messaging/webhooks" target="_blank" style={{ color: "blue" }}>
-                    here
-                  </a>
-                </Text>
-                <Table>
+            {!externalIntegrationsDisabled && (
+              <>
+                <TabPanel value="2">
+                  <div className="p-8">
+                    <CloudZeroCostTracking />
+                  </div>
+                </TabPanel>
+                <TabPanel value="3">
+                  <Card>
+                    <Text className="my-2">
+                      Alerts are only supported for Slack Webhook URLs. Get your webhook urls from{" "}
+                      <a href="https://api.slack.com/messaging/webhooks" target="_blank" style={{ color: "blue" }}>
+                        here
+                      </a>
+                    </Text>
+                    <Table>
                   <TableHead>
                     <TableRow>
                       <TableHeaderCell></TableHeaderCell>
@@ -686,12 +703,14 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
                 </Button>
               </Card>
             </TabPanel>
-            <TabPanel>
-              <AlertingSettings accessToken={accessToken} premiumUser={premiumUser} />
-            </TabPanel>
-            <TabPanel>
-              <EmailSettings accessToken={accessToken} premiumUser={premiumUser} alerts={alerts} />
-            </TabPanel>
+                <TabPanel value="4">
+                  <AlertingSettings accessToken={accessToken} premiumUser={premiumUser} />
+                </TabPanel>
+                <TabPanel value="5">
+                  <EmailSettings accessToken={accessToken} premiumUser={premiumUser} alerts={alerts} />
+                </TabPanel>
+              </>
+            )}
           </TabPanels>
         </TabGroup>
       </Grid>

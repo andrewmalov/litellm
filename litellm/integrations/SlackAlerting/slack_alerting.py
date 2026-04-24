@@ -73,6 +73,16 @@ class SlackAlerting(CustomBatchLogger):
         alert_type_config: Optional[Dict[str, dict]] = None,
         **kwargs,
     ):
+        # Check if external integrations are disabled
+        self._external_integrations_disabled = (
+            os.environ.get("LITELLM_DISABLE_EXTERNAL_INTEGRATIONS", "false").lower() == "true"
+        )
+
+        if self._external_integrations_disabled:
+            # When disabled, suppress all alerting
+            alerting = []
+            alerting_threshold = None
+
         if alerting_threshold is None:
             alerting_threshold = 300
         self.alerting_threshold = alerting_threshold

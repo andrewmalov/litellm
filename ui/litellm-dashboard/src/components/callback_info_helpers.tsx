@@ -9,7 +9,10 @@ interface CallbackConfig {
 
 const asset_logos_folder = "/ui/assets/logos/";
 
-export const CALLBACK_CONFIGS: CallbackConfig[] = [
+// Check if external integrations are disabled
+const externalIntegrationsDisabled = import.meta.env.VITE_DISABLE_EXTERNAL_INTEGRATIONS === "true";
+
+export const CALLBACK_CONFIGS: CallbackConfig[] = externalIntegrationsDisabled ? [] : [
   {
     id: "arize",
     displayName: "Arize",
@@ -166,8 +169,6 @@ export const CALLBACK_CONFIGS: CallbackConfig[] = [
     description: "SQS Queue (AWS) Logging Integration",
   },
 ];
-
-// Create callbackInfo object mapping display names to config objects
 export const callbackInfo: Record<string, CallbackConfig> = CALLBACK_CONFIGS.reduce(
   (acc, config) => {
     acc[config.displayName] = config;

@@ -3,7 +3,7 @@
 import React from "react";
 import { Select, Tooltip, Divider } from "antd";
 import { InfoCircleOutlined } from "@ant-design/icons";
-import { Button, Card, TextInput } from "@tremor/react";
+import { Button, Card, TextInput, Text } from "@tremor/react";
 import { PlusIcon, TrashIcon, CogIcon, BanIcon } from "@heroicons/react/outline";
 import { callbackInfo, callback_map, mapDisplayToInternalNames } from "../callback_info_helpers";
 import { resolveLogoSrc } from "@/lib/assetPaths";
@@ -30,6 +30,20 @@ const LoggingSettings: React.FC<LoggingSettingsProps> = ({
   disabledCallbacks = [],
   onDisabledCallbacksChange,
 }) => {
+  // Check if external integrations are disabled
+  const externalIntegrationsDisabled = import.meta.env.VITE_DISABLE_EXTERNAL_INTEGRATIONS === "true";
+
+  // Show disabled message if integrations are disabled
+  if (externalIntegrationsDisabled) {
+    return (
+      <Card>
+        <Text className="my-2">
+          External integrations are disabled. Set VITE_DISABLE_EXTERNAL_INTEGRATIONS=false to enable them.
+        </Text>
+      </Card>
+    );
+  }
+
   // Get callbacks that support team and key logging
   const supportedCallbacks = Object.entries(callbackInfo)
     .filter(([_, info]) => info.supports_key_team_logging)
