@@ -1,6 +1,6 @@
 services:
   caddy:
-    image: caddy:3-alpine
+    image: caddy:3
     container_name: litellm_caddy
     restart: unless-stopped
     ports:
