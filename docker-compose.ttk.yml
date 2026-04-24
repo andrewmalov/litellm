@@ -1,6 +1,6 @@
 services:
   caddy:
-    image: caddy:3
+    image: caddy:latest
     container_name: litellm_caddy
     restart: unless-stopped
     ports:
@@ -23,7 +23,7 @@ services:
     restart: unless-stopped
     environment:
       # Database
-      DATABASE_URL: "postgresql://litellm:CHANGE_ME_POSTGRES_PASSWORD@db:5432/litellm"
+      DATABASE_URL: "postgresql://litellm:${POSTGRES_PASSWORD}@db:5432/litellm"
       # Enterprise
       LITELLM_PREMIUM_USER: "True"
       LITELLM_LICENSE: "${LITELLM_LICENSE}"
