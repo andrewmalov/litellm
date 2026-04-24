@@ -1,0 +1,80 @@
+services:
+  caddy:
+    image: caddy:3-alpine
+    container_name: litellm_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      litellm:
+        condition: service_healthy
+    networks:
+      - litellm_network
+
+  litellm:
+    image: cr.selcloud.ru/ttkdc/litellm:latest
+    container_name: litellm_proxy
+    restart: unless-stopped
+    environment:
+      # Database
+      DATABASE_URL: "postgresql://litellm:CHANGE_ME_POSTGRES_PASSWORD@db:5432/litellm"
+      # Enterprise
+      LITELLM_PREMIUM_USER: "True"
+      LITELLM_LICENSE: "${LITELLM_LICENSE}"
+      # Model management via UI (no config.yaml needed)
+      STORE_MODEL_IN_DB: "True"
+      # Security
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
+      # All requests are logged to DB by default (spend_logs) - no extra config needed
+      # UI settings
+      LITELLM_UI_USERNAME: "${LITELLM_UI_USERNAME:-admin}"
+      LITELLM_UI_PASSWORD: "${LITELLM_UI_PASSWORD}"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - litellm_network
+    # Allow Caddy to reach LiteLLM on port 4000
+    expose:
+      - "4000"
+
+  db:
+    image: postgres:16-alpine
+    container_name: litellm_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d litellm -U litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - litellm_network
+
+networks:
+  litellm_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

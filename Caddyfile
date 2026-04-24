@@ -1,0 +1,44 @@
+{
+    # Optional: ACME email for certificate notifications
+    email {$CADDY_EMAIL}
+    # Store certificates on disk
+    storage file_system /data
+}
+
+# Admin API - restrict to internal network only
+:2019 {
+    # Allow internal access only
+    respond "Admin API - Internal Only" 200
+}
+
+# LiteLLM Proxy - serves both API and UI
+litellm.{$DOMAIN} {
+    reverse_proxy litellm:4000 {
+        # Pass original host header
+        header_up Host {host}
+        # Pass real client IP
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-For {remote}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Optional: Rate limiting for production
+    # handle_path /v1/* {
+    #     rate_limit {
+    #         zone static {
+    #             key {remote}
+    #             rate 100/s
+    #         }
+    #     }
+    # }
+
+    # Enable access log
+    log {
+        output file /data/access.log
+    }
+}
+
+# If you want to serve on root domain instead
+# {$DOMAIN} {
+#     reverse_proxy litellm:4000
+# }

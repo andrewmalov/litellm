@@ -98,6 +98,14 @@ class LicenseCheck:
         2. _verify: checks if license is valid calling litellm API. This is the old way we were generating/validating license
         """
         try:
+            import litellm.proxy.proxy_server
+
+            if getattr(litellm.proxy.proxy_server, "premium_user", False):
+                return True
+
+            if os.getenv("LITELLM_PREMIUM_USER", "").lower() == "true":
+                return True
+
             if not self._premium_check_logged:
                 verbose_proxy_logger.debug(
                     "litellm.proxy.auth.litellm_license.py::is_premium() - ENTERING 'IS_PREMIUM' - LiteLLM License={}".format(
