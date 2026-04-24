@@ -107,6 +107,8 @@ export enum Providers {
   xAI = "xAI",
   XINFERENCE = "Xinference",
   ZAI = "Z.AI (Zhipu AI)",
+  Yandex = "Yandex",
+  TTK = "TTK",
 }
 
 export const provider_map: Record<string, string> = {
@@ -216,6 +218,8 @@ export const provider_map: Record<string, string> = {
   xAI: "xai",
   XINFERENCE: "xinference",
   ZAI: "zai",
+  Yandex: "yandex",
+  TTK: "ttk",
 };
 
 const standaloneSubproviderSlugs = new Set<string>(["bedrock_mantle"]);
@@ -308,6 +312,8 @@ export const providerLogoMap: Record<string, string> = {
   [Providers.WATSONX_TEXT]: `${asset_logos_folder}watsonx.svg`,
   [Providers.xAI]: `${asset_logos_folder}xai.svg`,
   [Providers.XINFERENCE]: `${asset_logos_folder}xinference.svg`,
+  [Providers.Yandex]: `${asset_logos_folder}yandex.svg`,
+  [Providers.TTK]: `${asset_logos_folder}ttk.svg`,
 };
 
 export const getProviderLogoAndName = (providerValue: string): { logo: string; displayName: string } => {
@@ -379,6 +385,10 @@ export const getPlaceholder = (selectedProvider: string): string => {
     return "cursor/claude-4-sonnet";
   } else if (selectedProvider === Providers.ZAI) {
     return "zai/glm-4.5";
+  } else if (selectedProvider === Providers.Yandex) {
+    return "yandex/gpt://<folder_id>/aliceai-llm/latest";
+  } else if (selectedProvider === Providers.TTK) {
+    return "ttk/<model-name>";
   } else {
     return "gpt-3.5-turbo";
   }

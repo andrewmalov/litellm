@@ -289,6 +289,8 @@ novita_api_key: Optional[str] = None
 snowflake_key: Optional[str] = None
 gradient_ai_api_key: Optional[str] = None
 nebius_key: Optional[str] = None
+yandex_api_key: Optional[str] = None
+ttk_api_key: Optional[str] = None
 wandb_key: Optional[str] = None
 heroku_key: Optional[str] = None
 cometapi_key: Optional[str] = None
@@ -1751,6 +1753,9 @@ if TYPE_CHECKING:
     )
     from .llms.perplexity.responses.transformation import (
         PerplexityResponsesConfig as PerplexityResponsesConfig,
+    )
+    from .llms.yandex.responses.transformation import (
+        YandexResponsesConfig as YandexResponsesConfig,
     )
     from .llms.databricks.responses.transformation import (
         DatabricksResponsesAPIConfig as DatabricksResponsesAPIConfig,

@@ -551,6 +551,8 @@ LITELLM_CHAT_PROVIDERS = [
     "lemonade",
     "docker_model_runner",
     "amazon_nova",
+    "yandex",
+    "ttk",
 ]
 
 LITELLM_EMBEDDING_PROVIDERS_SUPPORTING_INPUT_ARRAY_OF_TOKENS = [
