@@ -28,6 +28,10 @@ RUN --mount=type=cache,target=/root/.npm npm ci --prefer-offline
 COPY ui/litellm-dashboard/ ./
 RUN npm run build
 
+# Private registry configuration
+ARG REGISTRY=cr.selcloud.ru/ttkdc
+ARG PLATFORM=linux/amd64
+
 # Builder stage
 FROM $LITELLM_BUILD_IMAGE AS builder
 
@@ -135,6 +139,12 @@ RUN find /app/.venv -type f -path "*/tornado/test/*" -delete && \
     test -f /opt/prisma/binaries/node_modules/prisma/build/index.js
 
 EXPOSE 4000/tcp
+
+ENV DOCKER_REGISTRY=${REGISTRY}
+ENV DOCKER_PLATFORM=${PLATFORM}
+
+RUN apk add --no-cache supervisor
+COPY docker/supervisord.conf /etc/supervisord.conf
 
 ENTRYPOINT ["docker/prod_entrypoint.sh"]
 CMD ["--port", "4000"]
