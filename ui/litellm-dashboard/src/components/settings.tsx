@@ -574,14 +574,10 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
         <TabGroup>
           <TabList variant="line" defaultValue="1">
             <Tab value="1">Logging Callbacks</Tab>
-            {externalIntegrationsDisabled ? null : (
-              <>
-                <Tab value="2">CloudZero Cost Tracking</Tab>
-                <Tab value="3">Alerting Types</Tab>
-                <Tab value="4">Alerting Settings</Tab>
-                <Tab value="5">Email Alerts</Tab>
-              </>
-            )}
+            {externalIntegrationsDisabled ? null : <Tab value="2">CloudZero Cost Tracking</Tab>}
+            {externalIntegrationsDisabled ? null : <Tab value="3">Alerting Types</Tab>}
+            {externalIntegrationsDisabled ? null : <Tab value="4">Alerting Settings</Tab>}
+            {externalIntegrationsDisabled ? null : <Tab value="5">Email Alerts</Tab>}
           </TabList>
           <TabPanels>
             <TabPanel value="1">
@@ -612,104 +608,108 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
                 />
               )}
             </TabPanel>
-            {!externalIntegrationsDisabled && (
-              <>
-                <TabPanel value="2">
-                  <div className="p-8">
-                    <CloudZeroCostTracking />
-                  </div>
-                </TabPanel>
-                <TabPanel value="3">
-                  <Card>
-                    <Text className="my-2">
-                      Alerts are only supported for Slack Webhook URLs. Get your webhook urls from{" "}
-                      <a href="https://api.slack.com/messaging/webhooks" target="_blank" style={{ color: "blue" }}>
-                        here
-                      </a>
-                    </Text>
-                    <Table>
-                  <TableHead>
-                    <TableRow>
-                      <TableHeaderCell></TableHeaderCell>
-                      <TableHeaderCell></TableHeaderCell>
-                      <TableHeaderCell>Slack Webhook URL</TableHeaderCell>
-                    </TableRow>
-                  </TableHead>
+            {externalIntegrationsDisabled ? null : (
+              <TabPanel value="2">
+                <div className="p-8">
+                  <CloudZeroCostTracking />
+                </div>
+              </TabPanel>
+            )}
+            {externalIntegrationsDisabled ? null : (
+              <TabPanel value="3">
+                <Card>
+                  <Text className="my-2">
+                    Alerts are only supported for Slack Webhook URLs. Get your webhook urls from{" "}
+                    <a href="https://api.slack.com/messaging/webhooks" target="_blank" style={{ color: "blue" }}>
+                      here
+                    </a>
+                  </Text>
+                  <Table>
+                    <TableHead>
+                      <TableRow>
+                        <TableHeaderCell></TableHeaderCell>
+                        <TableHeaderCell></TableHeaderCell>
+                        <TableHeaderCell>Slack Webhook URL</TableHeaderCell>
+                      </TableRow>
+                    </TableHead>
 
-                  <TableBody>
-                    {Object.entries(alerts_to_UI_NAME).map(([key, value], index) => (
-                      <TableRow key={index}>
-                        <TableCell>
-                          {key == "region_outage_alerts" ? (
-                            premiumUser ? (
+                    <TableBody>
+                      {Object.entries(alerts_to_UI_NAME).map(([key, value], index) => (
+                        <TableRow key={index}>
+                          <TableCell>
+                            {key == "region_outage_alerts" ? (
+                              premiumUser ? (
+                                <Switch
+                                  id="switch"
+                                  name="switch"
+                                  checked={isAlertOn(key)}
+                                  onChange={() => handleSwitchChange(key)}
+                                />
+                              ) : (
+                                <Button className="flex items-center justify-center">
+                                  <a href="https://forms.gle/W3U4PZpJGFHWtHyA9" target="_blank">
+                                    ✨ Enterprise Feature
+                                  </a>
+                                </Button>
+                              )
+                            ) : (
                               <Switch
                                 id="switch"
                                 name="switch"
                                 checked={isAlertOn(key)}
                                 onChange={() => handleSwitchChange(key)}
                               />
-                            ) : (
-                              <Button className="flex items-center justify-center">
-                                <a href="https://forms.gle/W3U4PZpJGFHWtHyA9" target="_blank">
-                                  ✨ Enterprise Feature
-                                </a>
-                              </Button>
-                            )
-                          ) : (
-                            <Switch
-                              id="switch"
-                              name="switch"
-                              checked={isAlertOn(key)}
-                              onChange={() => handleSwitchChange(key)}
-                            />
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <Text>{value}</Text>
-                        </TableCell>
-                        <TableCell>
-                          <TextInput
-                            name={key}
-                            type="password"
-                            defaultValue={
-                              alertToWebhooks && alertToWebhooks[key]
-                                ? alertToWebhooks[key]
-                                : (catchAllWebhookURL as string)
-                            }
-                          ></TextInput>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-                <Button size="xs" className="mt-2" onClick={handleSaveAlerts}>
-                  Save Changes
-                </Button>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <Text>{value}</Text>
+                          </TableCell>
+                          <TableCell>
+                            <TextInput
+                              name={key}
+                              type="password"
+                              defaultValue={
+                                alertToWebhooks && alertToWebhooks[key]
+                                  ? alertToWebhooks[key]
+                                  : (catchAllWebhookURL as string)
+                              }
+                            ></TextInput>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                  <Button size="xs" className="mt-2" onClick={handleSaveAlerts}>
+                    Save Changes
+                  </Button>
 
-                <Button
-                  onClick={async () => {
-                    try {
-                      await serviceHealthCheck(accessToken, "slack");
-                      NotificationsManager.success(
-                        "Alert test triggered. Test request to slack made - check logs/alerts on slack to verify",
-                      );
-                    } catch (error) {
-                      NotificationsManager.fromBackend(parseErrorMessage(error));
-                    }
-                  }}
-                  className="mx-2"
-                >
-                  Test Alerts
-                </Button>
-              </Card>
-            </TabPanel>
-                <TabPanel value="4">
-                  <AlertingSettings accessToken={accessToken} premiumUser={premiumUser} />
-                </TabPanel>
-                <TabPanel value="5">
-                  <EmailSettings accessToken={accessToken} premiumUser={premiumUser} alerts={alerts} />
-                </TabPanel>
-              </>
+                  <Button
+                    onClick={async () => {
+                      try {
+                        await serviceHealthCheck(accessToken, "slack");
+                        NotificationsManager.success(
+                          "Alert test triggered. Test request to slack made - check logs/alerts on slack to verify",
+                        );
+                      } catch (error) {
+                        NotificationsManager.fromBackend(parseErrorMessage(error));
+                      }
+                    }}
+                    className="mx-2"
+                  >
+                    Test Alerts
+                  </Button>
+                </Card>
+              </TabPanel>
+            )}
+            {externalIntegrationsDisabled ? null : (
+              <TabPanel value="4">
+                <AlertingSettings accessToken={accessToken} premiumUser={premiumUser} />
+              </TabPanel>
+            )}
+            {externalIntegrationsDisabled ? null : (
+              <TabPanel value="5">
+                <EmailSettings accessToken={accessToken} premiumUser={premiumUser} alerts={alerts} />
+              </TabPanel>
             )}
           </TabPanels>
         </TabGroup>
