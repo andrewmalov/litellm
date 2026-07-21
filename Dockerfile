@@ -143,8 +143,5 @@ EXPOSE 4000/tcp
 ENV DOCKER_REGISTRY=${REGISTRY}
 ENV DOCKER_PLATFORM=${PLATFORM}
 
-RUN apk add --no-cache supervisor
-COPY docker/supervisord.conf /etc/supervisord.conf
-
 ENTRYPOINT ["docker/prod_entrypoint.sh"]
 CMD ["--port", "4000"]
