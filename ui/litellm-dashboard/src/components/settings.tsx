@@ -573,14 +573,14 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
       <Grid numItems={1} className="gap-2 p-8 w-full mt-2">
         <TabGroup>
           <TabList variant="line" defaultValue="1">
-            <Tab value="1">Logging Callbacks</Tab>
-            <Tab value="2">CloudZero Cost Tracking</Tab>
-            <Tab value="3">Alerting Types</Tab>
-            <Tab value="4">Alerting Settings</Tab>
-            <Tab value="5">Email Alerts</Tab>
+            <Tab>Logging Callbacks</Tab>
+            <Tab>CloudZero Cost Tracking</Tab>
+            <Tab>Alerting Types</Tab>
+            <Tab>Alerting Settings</Tab>
+            <Tab>Email Alerts</Tab>
           </TabList>
           <TabPanels>
-            <TabPanel value="1">
+            <TabPanel>
               {externalIntegrationsDisabled ? (
                 <Card>
                   <Text className="my-2">
@@ -608,7 +608,7 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
                 />
               )}
             </TabPanel>
-            <TabPanel value="2">
+            <TabPanel>
               {externalIntegrationsDisabled ? (
                 <Card>
                   <Text className="my-2">
@@ -621,7 +621,7 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
                 </div>
               )}
             </TabPanel>
-            <TabPanel value="3">
+            <TabPanel>
               {externalIntegrationsDisabled ? (
                 <Card>
                   <Text className="my-2">
@@ -713,7 +713,7 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
                 </Card>
               )}
             </TabPanel>
-            <TabPanel value="4">
+            <TabPanel>
               {externalIntegrationsDisabled ? (
                 <Card>
                   <Text className="my-2">
@@ -724,7 +724,7 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
                 <AlertingSettings accessToken={accessToken} premiumUser={premiumUser} />
               )}
             </TabPanel>
-            <TabPanel value="5">
+            <TabPanel>
               {externalIntegrationsDisabled ? (
                 <Card>
                   <Text className="my-2">
