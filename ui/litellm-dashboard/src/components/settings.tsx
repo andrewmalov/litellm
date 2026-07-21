@@ -217,7 +217,7 @@ const buildCallbackPayload = (formValues: Record<string, any>, callbackName: str
 
 const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, premiumUser }) => {
   // Check if external integrations are disabled
-  const externalIntegrationsDisabled = import.meta.env.VITE_DISABLE_EXTERNAL_INTEGRATIONS === "true";
+  const externalIntegrationsDisabled = process.env.NEXT_PUBLIC_DISABLE_EXTERNAL_INTEGRATIONS === "true";
 
   const [callbacks, setCallbacks] = useState<AlertingObject[]>([]);
   const [alerts, setAlerts] = useState<any[]>([]);
@@ -588,7 +588,7 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
               {externalIntegrationsDisabled ? (
                 <Card>
                   <Text className="my-2">
-                    External integrations are disabled. Set VITE_DISABLE_EXTERNAL_INTEGRATIONS=false to enable them.
+                    External integrations are disabled. Set NEXT_PUBLIC_DISABLE_EXTERNAL_INTEGRATIONS=false to enable them.
                   </Text>
                 </Card>
               ) : (

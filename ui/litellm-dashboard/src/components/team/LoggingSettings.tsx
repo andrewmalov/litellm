@@ -31,14 +31,14 @@ const LoggingSettings: React.FC<LoggingSettingsProps> = ({
   onDisabledCallbacksChange,
 }) => {
   // Check if external integrations are disabled
-  const externalIntegrationsDisabled = import.meta.env.VITE_DISABLE_EXTERNAL_INTEGRATIONS === "true";
+  const externalIntegrationsDisabled = process.env.NEXT_PUBLIC_DISABLE_EXTERNAL_INTEGRATIONS === "true";
 
   // Show disabled message if integrations are disabled
   if (externalIntegrationsDisabled) {
     return (
       <Card>
         <Text className="my-2">
-          External integrations are disabled. Set VITE_DISABLE_EXTERNAL_INTEGRATIONS=false to enable them.
+          External integrations are disabled. Set NEXT_PUBLIC_DISABLE_EXTERNAL_INTEGRATIONS=false to enable them.
         </Text>
       </Card>
     );
