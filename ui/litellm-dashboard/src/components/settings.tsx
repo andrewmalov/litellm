@@ -574,7 +574,7 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
         <TabGroup>
           <TabList variant="line" defaultValue="1">
             <Tab value="1">Logging Callbacks</Tab>
-            {!externalIntegrationsDisabled && (
+            {externalIntegrationsDisabled ? null : (
               <>
                 <Tab value="2">CloudZero Cost Tracking</Tab>
                 <Tab value="3">Alerting Types</Tab>
