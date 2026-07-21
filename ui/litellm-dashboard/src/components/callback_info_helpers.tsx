@@ -10,7 +10,7 @@ interface CallbackConfig {
 const asset_logos_folder = "/ui/assets/logos/";
 
 // Check if external integrations are disabled
-const externalIntegrationsDisabled = import.meta.env.VITE_DISABLE_EXTERNAL_INTEGRATIONS === "true";
+const externalIntegrationsDisabled = process.env.NEXT_PUBLIC_DISABLE_EXTERNAL_INTEGRATIONS === "true";
 
 export const CALLBACK_CONFIGS: CallbackConfig[] = externalIntegrationsDisabled ? [] : [
   {
