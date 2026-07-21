@@ -574,10 +574,10 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
         <TabGroup>
           <TabList variant="line" defaultValue="1">
             <Tab value="1">Logging Callbacks</Tab>
-            {externalIntegrationsDisabled ? null : <Tab value="2">CloudZero Cost Tracking</Tab>}
-            {externalIntegrationsDisabled ? null : <Tab value="3">Alerting Types</Tab>}
-            {externalIntegrationsDisabled ? null : <Tab value="4">Alerting Settings</Tab>}
-            {externalIntegrationsDisabled ? null : <Tab value="5">Email Alerts</Tab>}
+            <Tab value="2">CloudZero Cost Tracking</Tab>
+            <Tab value="3">Alerting Types</Tab>
+            <Tab value="4">Alerting Settings</Tab>
+            <Tab value="5">Email Alerts</Tab>
           </TabList>
           <TabPanels>
             <TabPanel value="1">
@@ -608,15 +608,27 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
                 />
               )}
             </TabPanel>
-            {externalIntegrationsDisabled ? null : (
-              <TabPanel value="2">
+            <TabPanel value="2">
+              {externalIntegrationsDisabled ? (
+                <Card>
+                  <Text className="my-2">
+                    External integrations are disabled. Set NEXT_PUBLIC_DISABLE_EXTERNAL_INTEGRATIONS=false to enable them.
+                  </Text>
+                </Card>
+              ) : (
                 <div className="p-8">
                   <CloudZeroCostTracking />
                 </div>
-              </TabPanel>
-            )}
-            {externalIntegrationsDisabled ? null : (
-              <TabPanel value="3">
+              )}
+            </TabPanel>
+            <TabPanel value="3">
+              {externalIntegrationsDisabled ? (
+                <Card>
+                  <Text className="my-2">
+                    External integrations are disabled. Set NEXT_PUBLIC_DISABLE_EXTERNAL_INTEGRATIONS=false to enable them.
+                  </Text>
+                </Card>
+              ) : (
                 <Card>
                   <Text className="my-2">
                     Alerts are only supported for Slack Webhook URLs. Get your webhook urls from{" "}
@@ -699,18 +711,30 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
                     Test Alerts
                   </Button>
                 </Card>
-              </TabPanel>
-            )}
-            {externalIntegrationsDisabled ? null : (
-              <TabPanel value="4">
+              )}
+            </TabPanel>
+            <TabPanel value="4">
+              {externalIntegrationsDisabled ? (
+                <Card>
+                  <Text className="my-2">
+                    External integrations are disabled. Set NEXT_PUBLIC_DISABLE_EXTERNAL_INTEGRATIONS=false to enable them.
+                  </Text>
+                </Card>
+              ) : (
                 <AlertingSettings accessToken={accessToken} premiumUser={premiumUser} />
-              </TabPanel>
-            )}
-            {externalIntegrationsDisabled ? null : (
-              <TabPanel value="5">
+              )}
+            </TabPanel>
+            <TabPanel value="5">
+              {externalIntegrationsDisabled ? (
+                <Card>
+                  <Text className="my-2">
+                    External integrations are disabled. Set NEXT_PUBLIC_DISABLE_EXTERNAL_INTEGRATIONS=false to enable them.
+                  </Text>
+                </Card>
+              ) : (
                 <EmailSettings accessToken={accessToken} premiumUser={premiumUser} alerts={alerts} />
-              </TabPanel>
-            )}
+              )}
+            </TabPanel>
           </TabPanels>
         </TabGroup>
       </Grid>
