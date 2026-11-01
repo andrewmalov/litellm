@@ -402,8 +402,7 @@ def get_llm_provider(
                         custom_llm_provider = "gigachat"
                         dynamic_api_key = get_secret_str("GIGACHAT_API_KEY")
                     elif endpoint == "llmproxy.cloudttk.ru":
-                        custom_llm_provider = "ttk"
-                        dynamic_api_key = get_secret_str("TTK_API_KEY")
+                        return model, "ttk", get_secret_str("TTK_API_KEY"), api_base
                     elif (json_provider := JSONProviderRegistry.get_by_base_url(endpoint)) is not None:
                         custom_llm_provider = json_provider.slug
                         dynamic_api_key = api_key if api_key is not None else get_secret_str(json_provider.api_key_env)
