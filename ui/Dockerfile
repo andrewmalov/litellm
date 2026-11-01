@@ -2,11 +2,11 @@
 
 # UI container — Next.js static export served by nginx.
 
-ARG NODE_VERSION=20.18-alpine3.20
-ARG NGINX_VERSION=1.27-alpine
+ARG UI_BUILD_IMAGE=node:24.19-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
+ARG NGINX_VERSION=1.31.8-alpine3.24@sha256:1ef7ca94d7879df82421428ce13bd1eaa412404953859cf7a5b6512c25e67a60
 
 # ---------- builder ----------
-FROM node:${NODE_VERSION} AS builder
+FROM ${UI_BUILD_IMAGE} AS builder
 
 ENV NEXT_TELEMETRY_DISABLED=1 \
     npm_config_fund=false \
@@ -25,6 +25,8 @@ RUN npm run build
 
 # ---------- runtime ----------
 FROM nginx:${NGINX_VERSION} AS runtime
+
+RUN apk upgrade --no-cache brotli-libs
 
 # Drop the upstream default :80 server; we own the config.
 RUN rm -f /etc/nginx/conf.d/default.conf

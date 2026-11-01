@@ -5,12 +5,11 @@ API Docs: https://cloud.yandex.com/en/docs/yandexgpt/api-ref/grpc
 """
 
 import re
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any
 
 import httpx
 
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
-from litellm.llms.base_llm.responses.transformation import BaseResponsesAPIConfig
 from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import (
@@ -54,16 +53,14 @@ class YandexResponsesConfig(OpenAIResponsesAPIConfig):
         response_api_optional_params: ResponsesAPIOptionalRequestParams,
         model: str,
         drop_params: bool,
-    ) -> Dict:
+    ) -> dict:
         return dict(response_api_optional_params)
 
     @property
     def custom_llm_provider(self) -> LlmProviders:
         return LlmProviders.YANDEX
 
-    def validate_environment(
-        self, headers: dict, model: str, litellm_params: Optional[GenericLiteLLMParams]
-    ) -> dict:
+    def validate_environment(self, headers: dict, model: str, litellm_params: GenericLiteLLMParams | None) -> dict:
         litellm_params = litellm_params or GenericLiteLLMParams()
         api_key = litellm_params.api_key or get_secret_str("YANDEX_API_KEY")
         if api_key:
@@ -80,33 +77,27 @@ class YandexResponsesConfig(OpenAIResponsesAPIConfig):
         headers["Content-Type"] = "application/json"
         return headers
 
-    def _extract_folder_id(self, model: str) -> Optional[str]:
+    def _extract_folder_id(self, model: str) -> str | None:
         match = self._FOLDER_ID_PATTERN.match(model)
         if match:
             return match.group(1)
         return None
 
-    def get_complete_url(
-        self, api_base: Optional[str], litellm_params: dict
-    ) -> str:
-        api_base = (
-            api_base
-            or get_secret_str("YANDEX_API_BASE")
-            or self.YANDEX_API_BASE
-        )
+    def get_complete_url(self, api_base: str | None, litellm_params: dict) -> str:
+        api_base = api_base or get_secret_str("YANDEX_API_BASE") or self.YANDEX_API_BASE
         return f"{api_base.rstrip('/')}/responses"
 
     def transform_responses_api_request(
         self,
         model: str,
-        input: Union[str, ResponseInputParam],
-        response_api_optional_request_params: Dict,
+        input: str | ResponseInputParam,
+        response_api_optional_request_params: dict,
         litellm_params: GenericLiteLLMParams,
         headers: dict,
-    ) -> Dict:
+    ) -> dict:
         """Build Yandex-specific request body."""
         instructions = response_api_optional_request_params.pop("instructions", None)
-        data: Dict[str, Any] = {
+        data: dict[str, Any] = {
             "model": model,
             "input": input,
         }
@@ -141,22 +132,24 @@ class YandexResponsesConfig(OpenAIResponsesAPIConfig):
         yandex_response = raw_response_json.get("response", {})
         raw_response_json.get("usage", {})
 
-        output_items: List[Dict[str, Any]] = []
+        output_items: list[dict[str, Any]] = []
         if "result" in yandex_response:
             result_text = yandex_response.get("result", {})
             if isinstance(result_text, str):
-                output_items.append({
-                    "type": "message",
-                    "id": raw_response_json.get("response_id", ""),
-                    "status": "completed",
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": result_text,
-                        }
-                    ],
-                })
+                output_items.append(
+                    {
+                        "type": "message",
+                        "id": raw_response_json.get("response_id", ""),
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": result_text,
+                            }
+                        ],
+                    }
+                )
 
         usage = yandex_response.get("usage", {})
         normalized_usage = {

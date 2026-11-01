@@ -1,10 +1,11 @@
-import { Card, LineChart, Title } from "@tremor/react";
 import { useMemo } from "react";
+import { ChartLine } from "lucide-react";
+import { LineChart, stackedUsageColor } from "@/components/shared/charts";
 import { DailyData } from "@/components/UsagePage/types";
+import { Panel } from "../../overview/Primitives";
 
 interface EndpointUsageLineChartProps {
   dailyData?: { results: DailyData[] };
-  endpointData?: Record<string, any>;
 }
 
 // Transform daily data into chart format
@@ -42,7 +43,7 @@ function transformDailyDataToChart(dailyData: DailyData[]): Array<Record<string,
   return chartData.reverse();
 }
 
-export function EndpointUsageLineChart({ dailyData, endpointData }: EndpointUsageLineChartProps) {
+export function EndpointUsageLineChart({ dailyData }: EndpointUsageLineChartProps) {
   const chartData = useMemo(() => {
     if (!dailyData?.results || dailyData.results.length === 0) {
       return [];
@@ -58,28 +59,24 @@ export function EndpointUsageLineChart({ dailyData, endpointData }: EndpointUsag
     return keys;
   }, [chartData]);
 
-  // Tremor color palette for multiple lines
-  const colors = ["blue", "cyan", "indigo", "violet", "purple", "fuchsia", "pink", "rose", "red", "orange"];
+  const colors = useMemo(() => categories.map((_, i) => stackedUsageColor(i)), [categories]);
 
   return (
-    <Card className="mb-6">
-      <div className="flex items-center justify-between mb-4">
-        <Title>Endpoint Usage Trends</Title>
-      </div>
+    <Panel icon={ChartLine} title="Endpoint Usage Trends">
       <LineChart
-        className="h-80"
+        className="h-64"
         data={chartData}
         index="date"
         categories={categories}
-        colors={colors.slice(0, categories.length)}
+        colors={colors}
         valueFormatter={(value) => value.toLocaleString()}
         showLegend={true}
         showGridLines={true}
-        yAxisWidth={60}
+        yAxisWidth={56}
         connectNulls={true}
-        curveType="natural"
+        curveType="monotone"
       />
-    </Card>
+    </Panel>
   );
 }
 
