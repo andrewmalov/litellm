@@ -17,6 +17,7 @@ from typing import Any, Final
 from pydantic import TypeAdapter
 
 import litellm
+from litellm.proxy.auth.litellm_license import premium_user_override_enabled
 from litellm.types.secret_managers.main import KeyManagementSystem
 
 _PARSED_LITERAL: Final = TypeAdapter(object)
@@ -60,15 +61,11 @@ class AWSKeyManagementService_V2:
         if "AWS_REGION_NAME" not in os.environ:
             raise ValueError("Missing required environment variable - AWS_REGION_NAME")
 
-        ## CHECK IF LICENSE IN ENV ## - premium feature
-        is_litellm_license_in_env: bool = False
-
         if (
-            os.getenv("LITELLM_LICENSE", None) is not None
-            or os.getenv("LITELLM_SECRET_AWS_KMS_LITELLM_LICENSE", None) is not None
+            not premium_user_override_enabled()
+            and os.getenv("LITELLM_LICENSE", None) is None
+            and os.getenv("LITELLM_SECRET_AWS_KMS_LITELLM_LICENSE", None) is None
         ):
-            is_litellm_license_in_env = True
-        if is_litellm_license_in_env is False:
             raise ValueError(
                 "AWSKeyManagementService V2 is an Enterprise Feature. Please add a valid LITELLM_LICENSE to your envionment."
             )

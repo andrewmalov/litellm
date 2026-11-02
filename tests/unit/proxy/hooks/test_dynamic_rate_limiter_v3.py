@@ -8,6 +8,7 @@ import asyncio
 import os
 import time
 from datetime import datetime, timedelta
+from typing import Final
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -19,6 +20,18 @@ from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.hooks.dynamic_rate_limiter_v3 import (
     PROXY_DynamicRateLimitHandlerV3 as DynamicRateLimitHandler,
 )
+from litellm.types.utils import PriorityReservationSettings
+
+
+@pytest.mark.parametrize(("flag", "weight"), [("true", 0.25), ("false", 0.1)])
+def test_priority_weight_with_premium_override(monkeypatch: pytest.MonkeyPatch, flag: str, weight: float) -> None:
+    monkeypatch.delenv("LITELLM_LICENSE", raising=False)
+    monkeypatch.setenv("LITELLM_PREMIUM_USER", flag)
+    monkeypatch.setattr(litellm, "priority_reservation", {"reserved": 0.25})
+    monkeypatch.setattr(litellm, "priority_reservation_settings", PriorityReservationSettings(default_priority=0.1))
+    handler: Final = DynamicRateLimitHandler(internal_usage_cache=DualCache())
+
+    assert handler._get_priority_weight("reserved") == weight
 
 
 class TimeController:

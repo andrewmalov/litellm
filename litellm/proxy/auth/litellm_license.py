@@ -23,6 +23,10 @@ AUTO_ROUTER_LICENSE_REMEDY: Final = "A LiteLLM license with the 'auto_router' fe
 _LICENSE_VERDICT: Final = TypeAdapter(object)
 
 
+def premium_user_override_enabled() -> bool:
+    return os.getenv("LITELLM_PREMIUM_USER", "").lower() == "true"
+
+
 class LicenseCheck:
     """
     - Check if license in env
@@ -108,7 +112,7 @@ class LicenseCheck:
             if getattr(litellm.proxy.proxy_server, "premium_user", False):
                 return True
 
-            if os.getenv("LITELLM_PREMIUM_USER", "").lower() == "true":
+            if premium_user_override_enabled():
                 return True
 
             if not self._premium_check_logged:
@@ -142,7 +146,7 @@ class LicenseCheck:
         """
         Check if the license is over the limit
         """
-        if self.airgapped_license_data is None:
+        if premium_user_override_enabled() or self.airgapped_license_data is None:
             return False
         if "max_users" not in self.airgapped_license_data or not isinstance(
             self.airgapped_license_data["max_users"], int
@@ -154,7 +158,7 @@ class LicenseCheck:
         """
         Check if the license is over the limit
         """
-        if self.airgapped_license_data is None:
+        if premium_user_override_enabled() or self.airgapped_license_data is None:
             return False
 
         _max_teams_in_license: Final[int | None] = self.airgapped_license_data.get("max_teams")
@@ -163,6 +167,8 @@ class LicenseCheck:
         return team_count > _max_teams_in_license
 
     def grants_feature(self, feature: str) -> bool:
+        if premium_user_override_enabled():
+            return True
         if self.airgapped_license_data is None:
             return False
         allowed_features: Final = self.airgapped_license_data.get("allowed_features")
@@ -172,9 +178,8 @@ class LicenseCheck:
     def auto_router_capability_limit(self) -> int | None:
         """
         How many auto-routers may claim each gated classifier or customization capability:
-        unlimited (None) only when the signed license lists the auto_router feature or the
-        "*" wildcard that grants every feature, otherwise one per capability. A license verified
-        through the API carries no feature list, so it does not lift the limit either.
+        unlimited (None) when the premium override is enabled or the signed license grants
+        auto_router, otherwise one per capability.
         """
         if self.grants_feature(AUTO_ROUTER_LICENSE_FEATURE):
             return None

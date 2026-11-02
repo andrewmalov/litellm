@@ -16,6 +16,7 @@ from litellm.exceptions import RateLimitType
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.hidden_params import set_hidden_param
 from litellm.proxy._types import UserAPIKeyAuth
+from litellm.proxy.auth.litellm_license import premium_user_override_enabled
 from litellm.proxy.common_utils.proxy_rate_limit_error import ProxyRateLimitError
 from litellm.proxy.hooks.rate_limiter_utils import (
     convert_priority_to_percent,
@@ -116,7 +117,7 @@ class _PROXY_DynamicRateLimitHandler(CustomLogger):
                     litellm.priority_reservation,
                 )
             elif priority is not None and litellm.priority_reservation is not None:
-                if os.getenv("LITELLM_LICENSE", None) is None:
+                if not premium_user_override_enabled() and os.getenv("LITELLM_LICENSE", None) is None:
                     verbose_proxy_logger.error(
                         "PREMIUM FEATURE: Reserving tpm/rpm by priority is a premium feature. Please add a 'LITELLM_LICENSE' to your .env to enable this.\nGet a license: https://docs.litellm.ai/docs/proxy/enterprise."
                     )

@@ -8,7 +8,50 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 
 from litellm.llms.custom_httpx.http_handler import HTTPHandler
+from litellm.proxy._types import EnterpriseLicenseData
 from litellm.proxy.auth.litellm_license import LicenseCheck
+
+
+@pytest.mark.parametrize(
+    ("flag", "unlimited"),
+    [(None, False), ("", False), ("false", False), ("1", False), ("true", True), ("TRUE", True)],
+)
+@pytest.mark.parametrize("license_data", [None, {"allowed_features": []}])
+def test_premium_override_grants_features_and_unlimited_auto_routers(
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str | None,
+    unlimited: bool,
+    license_data: EnterpriseLicenseData | None,
+) -> None:
+    if flag is None:
+        monkeypatch.delenv("LITELLM_PREMIUM_USER", raising=False)
+    else:
+        monkeypatch.setenv("LITELLM_PREMIUM_USER", flag)
+    license_check: Final = LicenseCheck()
+    license_check.airgapped_license_data = license_data
+
+    assert license_check.grants_feature("auto_router") is unlimited
+    assert license_check.grants_feature("another_feature") is unlimited
+    assert license_check.auto_router_capability_limit() == (None if unlimited else 1)
+
+
+@pytest.mark.parametrize(
+    ("flag", "unlimited"),
+    [(None, False), ("", False), ("false", False), ("1", False), ("true", True), ("TRUE", True)],
+)
+@pytest.mark.parametrize("total", [99, 100, 101, 10**12])
+def test_premium_override_removes_signed_user_and_team_limits(
+    monkeypatch: pytest.MonkeyPatch, flag: str | None, unlimited: bool, total: int
+) -> None:
+    if flag is None:
+        monkeypatch.delenv("LITELLM_PREMIUM_USER", raising=False)
+    else:
+        monkeypatch.setenv("LITELLM_PREMIUM_USER", flag)
+    license_check: Final = LicenseCheck()
+    license_check.airgapped_license_data = {"max_users": 100, "max_teams": 100}
+
+    assert license_check.is_over_limit(total) is (total > 100 and not unlimited)
+    assert license_check.is_team_count_over_limit(total) is (total > 100 and not unlimited)
 
 
 def test_read_public_key_loads_successfully():

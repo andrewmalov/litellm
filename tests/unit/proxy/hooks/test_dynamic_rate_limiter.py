@@ -20,6 +20,38 @@ from typing import Optional
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("flag", "available"), [("true", (250, 25)), ("false", (1000, 100))])
+async def test_priority_reservation_with_premium_override(
+    monkeypatch: pytest.MonkeyPatch, flag: str, available: tuple[int, int]
+) -> None:
+    monkeypatch.delenv("LITELLM_LICENSE", raising=False)
+    monkeypatch.setenv("LITELLM_PREMIUM_USER", flag)
+    monkeypatch.setattr(litellm, "priority_reservation", {"reserved": 0.25})
+    handler: Final = DynamicRateLimitHandler(
+        internal_usage_cache=DualCache(),
+        time_fn=lambda: datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    router: Final = Router(
+        model_list=[
+            {
+                "model_name": "priority-test",
+                "litellm_params": {
+                    "model": "openai/priority-test-model",
+                    "api_key": "test-key",
+                    "tpm": 1000,
+                    "rpm": 100,
+                },
+            }
+        ]
+    )
+    handler.update_variables(llm_router=router)
+
+    result: Final = await handler.check_available_usage(model="priority-test", priority="reserved")
+
+    assert result[:2] == available
+
+
+@pytest.mark.asyncio
 async def test_sadd_and_get_share_injected_clock_window():
     dual_cache = DualCache()
     cache = DynamicRateLimiterCache(
