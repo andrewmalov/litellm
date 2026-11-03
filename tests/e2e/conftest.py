@@ -75,6 +75,7 @@ OPT_IN_MARKERS: Final = MappingProxyType(
         "otel_v2": OTEL_V2_OPT_IN_ENV,
         "otel_tls": OTEL_TLS_OPT_IN_ENV,
         "secret_manager": SECRET_MANAGER_OPT_IN_ENV,
+        "exclusive_pool": "E2E_EXCLUSIVE_POOL",
     }
 )
 
@@ -107,6 +108,7 @@ def jwt_identity(idp: Keycloak, resources: ResourceManager, proxy: ProxyClient) 
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line("markers", "exclusive_pool: requires an isolated empty exclusive endpoint pool")
     config.addinivalue_line(
         "markers", "migration_startup: isolated container startup tests run by the migration CI workflow"
     )
