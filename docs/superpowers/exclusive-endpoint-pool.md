@@ -6,6 +6,8 @@ Claude Code-shaped JSON in `metadata.user_id` is accepted as an emulated format.
 
 ## Configuration
 
+For a source-built Docker image and a Compose stack with persistent Redis, PostgreSQL and an explicit operator initialization command, use the [deployment template](../../docker/exclusive-pool/README.md)
+
 Provision separate upstream resources and configure every deployment in the same public model group. Deployment IDs must match the pool configuration. A physical upstream must appear only once, including outside the pool. Declare the same `quota_scope` and identical limits for deployments sharing an account quota
 
 Save the pool configuration as `exclusive-pool.json`:

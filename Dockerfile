@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
 # Base image for building
 ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7
@@ -15,10 +15,13 @@ ARG PGBOUNCER_SHA256=afd25dd61ee6775d37b40629b87ce08736b3e6955f3057bb212e410fbf2
 FROM $UV_IMAGE AS uvbin
 
 FROM $LITELLM_BUILD_IMAGE AS pgbouncer-builder
+ARG TARGETARCH
 ARG PGBOUNCER_VERSION
 ARG PGBOUNCER_SHA256
 USER root
-RUN apk add --no-cache build-base pkgconf libevent-dev openssl-dev curl
+RUN --mount=type=cache,id=wolfi-apk-${TARGETARCH},target=/var/cache/apk,sharing=locked \
+    apk --cache-dir /var/cache/apk add --update-cache --repository https://packages.wolfi.dev/os \
+    build-base pkgconf libevent-dev openssl-dev curl
 WORKDIR /build
 RUN curl -fsSL -o pgbouncer.tar.gz "https://www.pgbouncer.org/downloads/files/${PGBOUNCER_VERSION}/pgbouncer-${PGBOUNCER_VERSION}.tar.gz" && \
     echo "${PGBOUNCER_SHA256}  pgbouncer.tar.gz" | sha256sum -c - && \
@@ -46,6 +49,7 @@ RUN npm run build
 
 # Builder stage
 FROM $LITELLM_BUILD_IMAGE AS builder
+ARG TARGETARCH
 
 WORKDIR /app
 USER root
@@ -53,7 +57,8 @@ USER root
 COPY --from=uvbin /uv /usr/local/bin/uv
 COPY --from=uvbin /uvx /usr/local/bin/uvx
 
-RUN apk add --no-cache \
+RUN --mount=type=cache,id=wolfi-apk-${TARGETARCH},target=/var/cache/apk,sharing=locked \
+    apk --cache-dir /var/cache/apk add --update-cache --repository https://packages.wolfi.dev/os \
     bash \
     gcc \
     python-3.13 \
@@ -118,8 +123,10 @@ RUN sed -i 's/\r$//' docker/entrypoint.sh && chmod +x docker/entrypoint.sh && \
     sed -i 's/\r$//' docker/prod_entrypoint.sh && chmod +x docker/prod_entrypoint.sh
 
 FROM $LITELLM_BUILD_IMAGE AS liteadmin-builder
+ARG TARGETARCH
 COPY --from=uvbin /uv /usr/local/bin/uv
-RUN apk add --no-cache python-3.13
+RUN --mount=type=cache,id=wolfi-apk-${TARGETARCH},target=/var/cache/apk,sharing=locked \
+    apk --cache-dir /var/cache/apk add --update-cache --repository https://packages.wolfi.dev/os python-3.13
 ADD --checksum=sha256:4fb1847e28e2be30ba76dac94f02c4903291326516a0f4ba772f6ffb8b25d05c \
     https://github.com/BerriAI/litellm-admin-agent/archive/5661c805ce479a0cf11b842ea133cf8d22cd7e34.tar.gz /tmp/liteadmin.tar.gz
 RUN mkdir /tmp/liteadmin && tar xzf /tmp/liteadmin.tar.gz --strip-components=1 -C /tmp/liteadmin && \
@@ -129,6 +136,7 @@ RUN mkdir /tmp/liteadmin && tar xzf /tmp/liteadmin.tar.gz --strip-components=1 -
 
 # Runtime stage
 FROM $LITELLM_RUNTIME_IMAGE AS runtime
+ARG TARGETARCH
 ARG REGISTRY=cr.selcloud.ru/ttkdc
 ARG PLATFORM=linux/amd64
 ARG LITELLM_RELEASE_TAG=""
@@ -143,7 +151,8 @@ USER root
 RUN echo "https://packages.wolfi.dev/os" >> /etc/apk/repositories
 
 # node (without npm) is required by the prisma CLI at runtime
-RUN apk add --no-cache bash openssl libssl3 tzdata nodejs python-3.13 libsndfile libevent
+RUN --mount=type=cache,id=wolfi-apk-${TARGETARCH},target=/var/cache/apk,sharing=locked \
+    apk --cache-dir /var/cache/apk add --update-cache bash openssl libssl3 tzdata nodejs python-3.13 libsndfile libevent
 COPY --from=pgbouncer-builder /usr/local/bin/pgbouncer /usr/local/bin/pgbouncer
 
 WORKDIR /app

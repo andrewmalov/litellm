@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+ARG BASE_IMAGE=litellm-pool-base:ea57c0345c
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
+
+ENV LITELLM_RELEASE_TAG=exclusive-pool-5934b5681f
+LABEL org.opencontainers.image.revision=5934b5681f0045d15544583684cd62ab1c0d9769
+LABEL org.opencontainers.image.base.name=${BASE_IMAGE}
+
+COPY litellm/litellm_core_utils/device_identity.py /app/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/
+COPY litellm/router_utils/exclusive_pool/ /app/.venv/lib/python3.13/site-packages/litellm/router_utils/exclusive_pool/
+COPY litellm/proxy/common_request_processing.py litellm/proxy/proxy_server.py litellm/proxy/utils.py /app/.venv/lib/python3.13/site-packages/litellm/proxy/
