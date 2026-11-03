@@ -1245,7 +1245,7 @@ async def _relay_late_response(produced: Response) -> AsyncGenerator[bytes, None
 
 async def _sanitized_late_failure(
     exc: Exception,
-    on_late_failure: "Callable[[Exception], Awaitable[HTTPException | None]] | None",
+    on_late_failure: "Callable[[Exception], Awaitable[HTTPException | ProxyException | None]] | None",
 ) -> Exception:
     """Report a late failure and return whatever should reach the client.
 
@@ -1271,7 +1271,7 @@ async def open_sse_before_first_byte(
     produce_response: Awaitable[_LateResponseT],
     ping_interval_seconds: float | str | None,
     media_type: str = "text/event-stream",
-    on_late_failure: Callable[[Exception], Awaitable[HTTPException | None]] | None = None,
+    on_late_failure: Callable[[Exception], Awaitable[HTTPException | ProxyException | None]] | None = None,
 ) -> _LateResponseT | StreamingResponse:
     """Write SSE keepalive comments while the upstream LLM call is still in flight.
 
@@ -2548,7 +2548,7 @@ class ProxyBaseLLMRequestProcessing:
         ``litellm_settings.sse_keepalive_ping_interval_seconds``.
         """
 
-        async def _audit_late_failure(exc: Exception) -> HTTPException | None:
+        async def _audit_late_failure(exc: Exception) -> HTTPException | ProxyException | None:
             # Once a keepalive is on the wire this can no longer raise, so the
             # caller's `except` never runs its own post_call_failure_hook.
             return await proxy_logging_obj.post_call_failure_hook(

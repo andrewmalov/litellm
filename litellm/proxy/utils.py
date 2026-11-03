@@ -3596,7 +3596,7 @@ class ProxyLogging:
         error_type: ProxyErrorTypes | None = None,
         route: str | None = None,
         traceback_str: str | None = None,
-    ) -> HTTPException | None:
+    ) -> HTTPException | ProxyException | None:
         """
         Allows users to raise custom exceptions/log when a call fails, without having to deal with parsing Request body.
         Callbacks can return or raise HTTPException to transform error responses sent to clients.
@@ -3676,7 +3676,7 @@ class ProxyLogging:
         redacted_traceback_str: Final = redact_string(traceback_str) if traceback_str is not None else None
 
         # Track the first HTTPException returned or raised by any callback
-        transformed_exception: HTTPException | None = None
+        transformed_exception: HTTPException | ProxyException | None = None
 
         for callback in litellm.callbacks:
             try:
@@ -3698,7 +3698,7 @@ class ProxyLogging:
                         # If callback returned an HTTPException, use it (first one wins)
                         if isinstance(hook_result, HTTPException) and transformed_exception is None:
                             transformed_exception = hook_result
-                    except HTTPException as e:
+                    except (HTTPException, ProxyException) as e:
                         # If callback raised an HTTPException, use it (first one wins)
                         if transformed_exception is None:
                             transformed_exception = e

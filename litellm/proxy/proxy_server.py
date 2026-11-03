@@ -14084,7 +14084,7 @@ async def run_thread(
                     request=request,
                 )
 
-            async def audit_late_failure(exc: Exception) -> HTTPException | None:
+            async def audit_late_failure(exc: Exception) -> HTTPException | ProxyException | None:
                 # Once a keepalive is on the wire this can no longer raise, so the
                 # handler's own `except` never runs its post_call_failure_hook.
                 return await proxy_logging_obj.post_call_failure_hook(
@@ -17559,7 +17559,7 @@ async def async_queue_request(
                     media_type="text/event-stream",
                 )
 
-            async def audit_late_failure(exc: Exception) -> HTTPException | None:
+            async def audit_late_failure(exc: Exception) -> HTTPException | ProxyException | None:
                 return await proxy_logging_obj.post_call_failure_hook(
                     user_api_key_dict=user_api_key_dict, original_exception=exc, request_data=data
                 )

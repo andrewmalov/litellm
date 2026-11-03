@@ -52,3 +52,26 @@ The e2e scenario collects with the explicit opt-in and is deselected without it.
 `make check` bootstrap was blocked first by the system uv version, then, using the existing compatible uv in `.venv`, by npm 11.9.0 being below the dashboard requirement 11.10.0. Its underlying `scripts/pre_commit_lint.sh` ran with the existing compatible uv and passed all checks selected for these changes. The complete gate log is `.git/pre_commit_lint.log`
 
 Independent review found no critical or important defects in the first increment. The sampling documentation was clarified to distinguish missing a particular replica from missing either replica
+
+## Core implementation
+
+Use frozen domain models and pure state transitions, with Redis WATCH/MULTI compare-and-set as the atomic boundary. Keep all state for a pool in one persistent Redis key so Redis Cluster places it in one slot. Missing coordination state fails closed and requires explicit operator initialization after confirming no old upstream work exists
+
+Implement identity validation before API conversion, round-robin allocation and sticky fallback, per-client and per-resource reservation accounting, generation-safe completion and heartbeat. Unconfirmed upstream termination remains quarantined until an operator confirms completion. Redis snapshots contain digests and accounting only, never prompts or credentials
+
+Connect through CustomLogger proxy and deployment hooks, retaining standard authentication and Router checks. Reserve before selection, mark upstream start separately, and roll back unsent failures. Streaming completion requires a terminal finish event followed by normal iterator exhaustion; cancellation and ambiguous transport failure do not establish upstream termination
+
+Tests cover pure transition boundaries first, then real Redis contention and callback-to-provider wire behavior. Automatic recovery and production client-format qualification remain gated on demonstrated lifecycle correctness
+
+
+## Core verification and remaining qualification
+
+The focused suite passed 66 tests: pure identity/state/recovery/request/admin tests, real Redis contention and five real proxy scenarios with PostgreSQL, Redis, two workers and a scripted upstream. The proxy scenarios exercise virtual-key limits, device binding and conflicts, sticky primary/fallback selection, stream completion and cancellation, confirmed upstream failure followed by another primary and an actual recovery generation, concurrent first-device requests and missing coordination state
+
+Independent review found abandoned probes stuck in probing and unbounded multiple-choice output reservation. Regression tests reproduced both defects before fixes. Matching-generation probe cleanup now restores cooldown, multiple choices are rejected, prompt schemas are included in input reservation and probes reserve their own input. Follow-up review found no further important issues in the reviewed core
+
+Canonical-environment basedpyright reports zero diagnostics for the new production modules. The full type gate compared with the preceding commit c491d3b35c65 and the strict Ruff gate compared with HEAD show no rule growth for this implementation. Type discipline and test-quality gates passed. The whole branch still exceeds the default-branch baseline for pre-existing reportArgumentType, reportPrivateUsage, reportUnknownArgumentType and RUF012 counts. This is a remaining branch check failure, not a passing default-branch gate
+
+The direct pre-commit runner also verified ordinary Ruff, formatting, e2e typing, circular imports, import safety and OpenAPI/dashboard type synchronization. make check stops earlier during dashboard bootstrap because installed npm 11.9.0 is below the required 11.10.0. No caps, dependency requirements or gate thresholds were changed
+
+The current adapter supports single-choice text Chat Completions and one upstream attempt per request. Native Messages/Responses, installed Claude Code/Desktop versions, real providers and Redis Cluster/failover remain unqualified. No real-provider credentials were available for live acceptance. The operational setup and explicit initialization/recovery commands are in ../exclusive-endpoint-pool.md
