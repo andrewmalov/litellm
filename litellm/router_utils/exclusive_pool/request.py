@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import Annotated, Final, NoReturn
 
-from pydantic import Field, JsonValue, ValidationError
+from pydantic import Field, JsonValue, TypeAdapter, ValidationError
 
 from litellm.proxy._types import ProxyException
 from litellm.types.utils import ModelResponseStream
@@ -120,6 +120,7 @@ def raise_public(failure: Failure) -> NoReturn:
 
 
 class MetadataCarriers(FrozenModel):
+    model_info: DeploymentInfo | None = None
     metadata: Mapping[str, object] = Field(default_factory=dict)
     litellm_metadata: Mapping[str, object] = Field(default_factory=dict)
 
@@ -127,20 +128,39 @@ class MetadataCarriers(FrozenModel):
         return verified_ticket(self.metadata.get(TICKET_KEY, self.litellm_metadata.get(TICKET_KEY)), secret)
 
     @property
+    def pool(self) -> str | None:
+        return self.model_info.exclusive_pool if self.model_info is not None else None
+
+    @property
     def deployment(self) -> str | None:
-        raw: Final = self.metadata.get("model_info", self.litellm_metadata.get("model_info"))
-        try:
-            return DeploymentInfo.model_validate(raw).id
-        except ValidationError:
-            return None
+        return self.model_info.id if self.model_info is not None else None
 
 
 class DeploymentInfo(FrozenModel):
     id: str
+    exclusive_pool: str | None = None
 
 
 class DeploymentView(FrozenModel):
+    model_name: str | None = None
     model_info: DeploymentInfo
+
+
+class _RouterDeployment(FrozenModel):
+    model_name: str
+    model_info: Mapping[str, object]
+
+
+_ROUTER_DEPLOYMENTS: Final = TypeAdapter(tuple[_RouterDeployment, ...])
+
+
+def marked_model(model: object, deployments: object) -> bool:
+    validated: Final = _ROUTER_DEPLOYMENTS.validate_python(deployments)
+    return any(
+        deployment.model_info.get("exclusive_pool") is not None
+        and model in (deployment.model_name, deployment.model_info.get("id"))
+        for deployment in validated
+    )
 
 
 class UsageView(FrozenModel):

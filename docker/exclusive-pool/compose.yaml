@@ -1,14 +1,14 @@
 name: litellm-exclusive-pool
 
 x-image: &image
-  image: ${LITELLM_IMAGE:-litellm-exclusive-pool:5934b5681f}
+  image: ${LITELLM_IMAGE:-cr.selcloud.ru/ttkdc/litellm:exclusive-pool-discovery-20261103}
   platform: linux/amd64
   build:
     context: ../..
     dockerfile: Dockerfile
     target: runtime
     args:
-      LITELLM_RELEASE_TAG: exclusive-pool-5934b5681f
+      LITELLM_RELEASE_TAG: exclusive-pool-discovery-20261103
 
 x-pool-environment: &pool-environment
   LITELLM_LOCAL_MODEL_COST_MAP: "True"
@@ -26,13 +26,6 @@ services:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?set LITELLM_SALT_KEY in .env}
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/litellm
-      UPSTREAM_MODEL: ${UPSTREAM_MODEL:?set UPSTREAM_MODEL in .env}
-      PRIMARY_A_BASE_URL: ${PRIMARY_A_BASE_URL:?set PRIMARY_A_BASE_URL in .env}
-      PRIMARY_A_API_KEY: ${PRIMARY_A_API_KEY:?set PRIMARY_A_API_KEY in .env}
-      PRIMARY_B_BASE_URL: ${PRIMARY_B_BASE_URL:?set PRIMARY_B_BASE_URL in .env}
-      PRIMARY_B_API_KEY: ${PRIMARY_B_API_KEY:?set PRIMARY_B_API_KEY in .env}
-      FALLBACK_BASE_URL: ${FALLBACK_BASE_URL:?set FALLBACK_BASE_URL in .env}
-      FALLBACK_API_KEY: ${FALLBACK_API_KEY:?set FALLBACK_API_KEY in .env}
     volumes:
       - type: bind
         source: ./proxy.yaml

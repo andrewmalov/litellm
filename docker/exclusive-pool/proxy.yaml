@@ -1,28 +1,4 @@
-model_list:
-  - model_name: exclusive-pool
-    litellm_params:
-      model: os.environ/UPSTREAM_MODEL
-      api_base: os.environ/PRIMARY_A_BASE_URL
-      api_key: os.environ/PRIMARY_A_API_KEY
-      max_retries: 0
-    model_info:
-      id: primary-a
-  - model_name: exclusive-pool
-    litellm_params:
-      model: os.environ/UPSTREAM_MODEL
-      api_base: os.environ/PRIMARY_B_BASE_URL
-      api_key: os.environ/PRIMARY_B_API_KEY
-      max_retries: 0
-    model_info:
-      id: primary-b
-  - model_name: exclusive-pool
-    litellm_params:
-      model: os.environ/UPSTREAM_MODEL
-      api_base: os.environ/FALLBACK_BASE_URL
-      api_key: os.environ/FALLBACK_API_KEY
-      max_retries: 0
-    model_info:
-      id: fallback
+model_list: []
 litellm_settings:
   callbacks:
     - litellm.router_utils.exclusive_pool.configured.callback
@@ -31,3 +7,4 @@ router_settings:
   disable_cooldowns: true
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
+  store_model_in_db: true

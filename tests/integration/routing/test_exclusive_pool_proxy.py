@@ -1,7 +1,7 @@
-import os
 import json
-import threading
+import os
 import queue
+import threading
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -17,10 +17,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from redis import Redis
 
-from litellm.router_utils.exclusive_pool.models import Limits, PoolConfig, Resource
+from litellm.router_utils.exclusive_pool.models import Limits, PoolConfig, Resource, Snapshot
 from litellm.router_utils.exclusive_pool.state import empty_state
 from tests.integration._support.asgi import asgi_server
-from tests.integration._support.client import Gateway
+from tests.integration._support.client import Gateway, eventually
 from tests.integration._support.process import owned_proxy
 
 
@@ -31,6 +31,7 @@ class Rig:
     calls: queue.SimpleQueue[str]
     stream_release: threading.Event
     fail_primary: threading.Event
+    upstream: str
 
     def chat(self, key: str, device: str | None, **extra: object) -> httpx.Response:
         return self.proxy.request(
@@ -52,10 +53,12 @@ class Rig:
 
 
 @pytest.fixture
-def rig(tmp_path: Path) -> Iterator[Rig]:
+def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
+    dynamic: Final = request.param if hasattr(request, "param") else False
     marker: Final = uuid.uuid4().hex
     config: Final = PoolConfig(
         pool_id=f"pool-{marker}",
+        discovery=dynamic,
         models=(f"exclusive-{marker}",),
         primaries=(Resource(id=f"a-{marker}", upstream_id="a"), Resource(id=f"b-{marker}", upstream_id="b")),
         fallback=Resource(id=f"f-{marker}", upstream_id="f", limits=Limits(parallel=2)),
@@ -129,7 +132,9 @@ def rig(tmp_path: Path) -> Iterator[Rig]:
         proxy_config.write_text(
             yaml.safe_dump(
                 {
-                    "model_list": [
+                    "model_list": []
+                    if dynamic
+                    else [
                         {
                             "model_name": config.models[0],
                             "litellm_params": {
@@ -147,7 +152,7 @@ def rig(tmp_path: Path) -> Iterator[Rig]:
                     ],
                     "litellm_settings": {"callbacks": ["litellm.router_utils.exclusive_pool.configured.callback"]},
                     "router_settings": {"num_retries": 0, "disable_cooldowns": True},
-                    "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY"},
+                    "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY", "store_model_in_db": dynamic},
                 }
             )
         )
@@ -164,13 +169,41 @@ def rig(tmp_path: Path) -> Iterator[Rig]:
                 workers=2,
             ) as proxy:
                 try:
-                    yield Rig(proxy, config, calls, stream_release, fail_primary)
+                    if dynamic:
+                        for resource in config.resources:
+                            proxy.post(
+                                "/model/new",
+                                {
+                                    "model_name": config.models[0],
+                                    "litellm_params": {
+                                        "model": "openai/exclusive-test-model",
+                                        "api_base": f"{upstream}/{resource.id}/v1",
+                                        "api_key": "synthetic",
+                                        "max_retries": 0,
+                                        "input_cost_per_token": 0,
+                                        "output_cost_per_token": 0,
+                                    },
+                                    "model_info": {
+                                        "id": resource.id,
+                                        "exclusive_pool": config.pool_id,
+                                        "exclusive_pool_role": "fallback"
+                                        if config.is_fallback(resource.id)
+                                        else "primary",
+                                        "exclusive_pool_limits": resource.limits.model_dump(),
+                                    },
+                                },
+                            )
+                    yield Rig(proxy, config, calls, stream_release, fail_primary, upstream)
                 finally:
                     stream_release.set()
+                    if dynamic:
+                        for resource in config.resources:
+                            proxy.post("/model/delete", {"id": resource.id})
     redis.delete(state_key)
     redis.close()
 
 
+@pytest.mark.parametrize("rig", [False, True], indirect=True)
 def test_real_proxy_enforces_device_binding_and_sticky_primary_and_fallback(rig: Rig) -> None:
     keys: Final = tuple(
         str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"]) for _ in range(4)
@@ -288,3 +321,105 @@ def test_two_workers_resolve_first_device_race_and_fail_closed_after_state_loss(
             redis.close()
     finally:
         rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize("rig", [True], indirect=True)
+def test_standard_model_api_addition_and_removal_update_pool_without_restart(rig: Rig) -> None:
+    redis: Final = Redis(host=os.environ["REDIS_HOST"], port=int(os.environ["REDIS_PORT"]))
+    state_key: Final = f"litellm:exclusive-pool:{{{rig.config.pool_id}}}:state"
+    identifier: Final = f"new-{rig.config.pool_id}"
+    keys: Final = tuple(
+        str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"]) for _ in range(4)
+    )
+    try:
+        initial: Final = tuple(rig.chat(key, "device") for key in keys[:2])
+        assert tuple(reply.status_code for reply in initial) == (200, 200), tuple(reply.text for reply in initial)
+        rig.proxy.post(
+            "/model/new",
+            {
+                "model_name": rig.config.models[0],
+                "litellm_params": {
+                    "model": "openai/exclusive-test-model",
+                    "api_base": f"{rig.upstream}/{identifier}/v1",
+                    "api_key": "synthetic",
+                    "max_retries": 0,
+                    "input_cost_per_token": 0,
+                    "output_cost_per_token": 0,
+                },
+                "model_info": {
+                    "id": identifier,
+                    "exclusive_pool": rig.config.pool_id,
+                    "exclusive_pool_role": "primary",
+                },
+            },
+        )
+        eventually(
+            lambda: Snapshot.model_validate_json(redis.get(state_key)),
+            lambda snapshot: any(entry.resource.id == identifier and entry.active for entry in snapshot.catalog),
+        )
+        added: Final = eventually(lambda: rig.chat(keys[2], "device"), lambda reply: reply.status_code == 200)
+        assert added.headers["x-litellm-model-id"] == identifier, added.text
+        sticky: Final = rig.chat(keys[0], "device")
+        assert (
+            sticky.status_code == 200
+            and sticky.headers["x-litellm-model-id"] == initial[0].headers["x-litellm-model-id"]
+        )
+        rig.proxy.post("/model/delete", {"id": identifier})
+        eventually(
+            lambda: Snapshot.model_validate_json(redis.get(state_key)),
+            lambda snapshot: any(entry.resource.id == identifier and not entry.active for entry in snapshot.catalog),
+        )
+        moved: Final = rig.chat(keys[2], "device")
+        assert moved.status_code == 200, moved.text
+        assert rig.config.fallback is not None
+        assert moved.headers["x-litellm-model-id"] == rig.config.fallback.id
+        conflict: Final = rig.chat(keys[2], "another-device")
+        assert conflict.status_code == 409, conflict.text
+    finally:
+        rig.proxy.post("/key/delete", {"keys": list(keys)})
+        redis.close()
+
+
+@pytest.mark.parametrize("rig", [True], indirect=True)
+def test_direct_deployment_responses_cannot_mask_pool_identity_with_caller_metadata(rig: Rig) -> None:
+    response: Final = rig.proxy.request(
+        "POST",
+        "/v1/responses",
+        {"model": rig.config.primaries[0].id, "input": "hello", "metadata": {"model_info": {"id": "fake"}}},
+    )
+    assert response.status_code in (400, 503), response.text
+    assert rig.calls.empty()
+
+
+@pytest.mark.parametrize("rig", [True], indirect=True)
+def test_unmarked_model_keeps_serving_when_pool_state_is_lost(rig: Rig) -> None:
+    identifier: Final = f"ordinary-{rig.config.pool_id}"
+    rig.proxy.post(
+        "/model/new",
+        {
+            "model_name": identifier,
+            "litellm_params": {
+                "model": "openai/exclusive-test-model",
+                "api_base": f"{rig.upstream}/ordinary/v1",
+                "api_key": "synthetic",
+                "input_cost_per_token": 0,
+                "output_cost_per_token": 0,
+            },
+            "model_info": {"id": identifier},
+        },
+    )
+    redis: Final = Redis(host=os.environ["REDIS_HOST"], port=int(os.environ["REDIS_PORT"]))
+    state_key: Final = f"litellm:exclusive-pool:{{{rig.config.pool_id}}}:state"
+    redis.delete(state_key)
+    try:
+        ordinary: Final = rig.proxy.request(
+            "POST", "/v1/chat/completions", {"model": identifier, "messages": [{"role": "user", "content": "hello"}]}
+        )
+        assert ordinary.status_code == 200, ordinary.text
+        assert ordinary.json()["choices"][0]["message"]["content"] == "ordinary"
+        protected: Final = rig.chat(rig.proxy.key, "device")
+        assert protected.status_code == 503, protected.text
+        assert redis.exists(state_key) == 0
+    finally:
+        rig.proxy.post("/model/delete", {"id": identifier})
+        redis.close()

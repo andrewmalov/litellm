@@ -1,15 +1,8 @@
 {
   "pool_id": "exclusive",
-  "models": ["exclusive-pool"],
-  "primaries": [
-    {"id": "primary-a", "upstream_id": "resource-a"},
-    {"id": "primary-b", "upstream_id": "resource-b"}
-  ],
-  "fallback": {
-    "id": "fallback",
-    "upstream_id": "resource-fallback",
-    "limits": {"parallel": 2, "rpm": 60, "tpm": 60000}
-  },
+  "discovery": true,
+  "primary_limits": {"parallel": 4, "rpm": 60, "tpm": 60000},
+  "fallback_limits": {"parallel": 2, "rpm": 60, "tpm": 60000},
   "client_limits": {"parallel": 2, "rpm": 60, "tpm": 60000},
   "output_tokens": 256,
   "heartbeat_seconds": 10,

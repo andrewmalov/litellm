@@ -90,3 +90,29 @@ def test_legacy_functions_and_response_schema_are_included_in_input_reservation(
         }
     )
     assert legacy.reserved_tokens(16) >= base.reserved_tokens(16) + 10000
+
+
+def test_router_stamped_deployment_identity_takes_precedence_over_caller_metadata() -> None:
+    from litellm.router_utils.exclusive_pool.request import MetadataCarriers
+
+    carriers: Final = MetadataCarriers.model_validate(
+        {
+            "model_info": {"id": "actual", "exclusive_pool": "main"},
+            "metadata": {"model_info": {"id": "fake"}},
+            "litellm_metadata": {"model_info": {"id": "another-fake"}},
+        }
+    )
+    assert carriers.deployment == "actual"
+    assert carriers.pool == "main"
+
+
+def test_malformed_pool_label_on_another_model_does_not_break_model_classification() -> None:
+    from litellm.router_utils.exclusive_pool.request import marked_model
+
+    deployments: Final = (
+        {"model_name": "bad", "model_info": {"id": "bad-id", "exclusive_pool": 123}},
+        {"model_name": "ordinary", "model_info": {"id": "ordinary-id"}},
+    )
+    assert not marked_model("ordinary", deployments)
+    assert marked_model("bad", deployments)
+    assert marked_model("bad-id", deployments)

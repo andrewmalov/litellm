@@ -69,3 +69,35 @@ def test_confirming_unknown_probe_end_requires_another_probe_before_ready() -> N
     assert not isinstance(confirmed, Denied)
     assert confirmed.health[0].status == "cooldown"
     assert isinstance(claim_probe(confirmed, config, "a", "new-probe", now=101), Granted)
+
+
+def test_static_to_discovery_migration_preserves_bindings_health_and_quota_history() -> None:
+    from litellm.router_utils.exclusive_pool.state import complete
+
+    previous: Final = PoolConfig(
+        pool_id="p",
+        models=("m",),
+        primaries=(Resource(id="a", upstream_id="physical-a"),),
+        fallback=Resource(id="f", upstream_id="physical-f"),
+        client_limits=Limits(),
+    )
+    admitted: Final = acquire(
+        empty_state(previous),
+        previous,
+        Admission(client="c", device="d", operation="op", tokens=7, eligible=("a",)),
+        1,
+    )
+    assert isinstance(admitted, Granted)
+    ended: Final = complete(admitted.state, previous, "op", 2)
+    disabled: Final = ended.model_copy(
+        update={"health": tuple(h.model_copy(update={"status": "disabled"}) for h in ended.health)}
+    )
+    dynamic: Final = PoolConfig(pool_id="p", discovery=True, client_limits=Limits())
+    assert isinstance(reconfigure(disabled, dynamic), Denied)
+    migrated: Final = reconfigure(disabled, dynamic, previous)
+    assert not isinstance(migrated, Denied)
+    assert migrated.sessions == disabled.sessions
+    assert migrated.health == disabled.health
+    assert migrated.charges == disabled.charges
+    assert tuple(entry.resource.upstream_id for entry in migrated.catalog) == ("physical-a", "physical-f")
+    assert all(not entry.active for entry in migrated.catalog)

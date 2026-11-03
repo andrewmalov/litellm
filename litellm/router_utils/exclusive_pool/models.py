@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Final, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
@@ -31,9 +31,13 @@ class Resource(FrozenModel):
 
 class PoolConfig(FrozenModel):
     pool_id: Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]+$")]
-    models: Annotated[tuple[str, ...], Field(min_length=1)]
-    primaries: Annotated[tuple[Resource, ...], Field(min_length=1)]
-    fallback: Resource
+    models: tuple[str, ...] = ()
+    primaries: tuple[Resource, ...] = ()
+    fallback: Resource | None = None
+    discovery: bool = False
+    primary_limits: Limits = Field(default_factory=Limits)
+    fallback_limits: Limits = Field(default_factory=Limits)
+    retired: tuple[Resource, ...] = ()
     client_limits: Limits
     output_tokens: Annotated[int, Field(gt=0)] = 256
     heartbeat_seconds: Annotated[float, Field(gt=0)] = 10
@@ -43,14 +47,41 @@ class PoolConfig(FrozenModel):
 
     @property
     def resources(self) -> tuple[Resource, ...]:
-        return (*self.primaries, self.fallback)
+        return (*self.selectable, *self.retired)
+
+    @property
+    def selectable(self) -> tuple[Resource, ...]:
+        return (*self.primaries, *((self.fallback,) if self.fallback is not None else ()))
+
+    def is_fallback(self, resource: str) -> bool:
+        return self.fallback is not None and resource == self.fallback.id
+
+    def resolve(self, snapshot: Snapshot) -> PoolConfig:
+        if not self.discovery:
+            return self
+        return self.model_copy(
+            update={
+                "models": tuple(sorted(frozenset((*self.models, *(entry.model for entry in snapshot.catalog))))),
+                "primaries": tuple(e.resource for e in snapshot.catalog if e.active and e.role == "primary"),
+                "fallback": next((e.resource for e in snapshot.catalog if e.active and e.role == "fallback"), None),
+                "retired": tuple(e.resource for e in snapshot.catalog if not e.active),
+            }
+        )
 
     @property
     def fingerprint(self) -> str:
-        return hashlib.sha256(self.model_dump_json().encode()).hexdigest()
+        excluded: Final = (
+            {"models", "primaries", "fallback", "retired"}
+            if self.discovery
+            else {"discovery", "primary_limits", "fallback_limits", "retired"}
+        )
+        return hashlib.sha256(self.model_dump_json(exclude=excluded).encode()).hexdigest()
 
     @model_validator(mode="after")
     def consistent(self) -> Self:
+        assert self.discovery or (self.models and self.primaries and self.fallback is not None), (
+            "static pool is incomplete"
+        )
         assert len(frozenset(r.id for r in self.resources)) == len(self.resources), "deployment IDs must be unique"
         assert len(frozenset(r.upstream_id for r in self.resources)) == len(self.resources), "upstreams must be unique"
         assert self.heartbeat_timeout > self.heartbeat_seconds, "heartbeat timeout must exceed its interval"
@@ -142,8 +173,18 @@ class Event(FrozenModel):
     resource: str = ""
 
 
+class CatalogEntry(FrozenModel):
+    resource: Resource
+    model: str
+    role: Literal["primary", "fallback"]
+    active: bool = True
+
+
 class Snapshot(FrozenModel):
     fingerprint: str
+    catalog: tuple[CatalogEntry, ...] = ()
+    discovered_at: float | None = None
+    catalog_generation: int = 0
     cursor: str | None = None
     sessions: tuple[Session, ...] = ()
     operations: tuple[Operation, ...] = ()

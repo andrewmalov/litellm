@@ -6,7 +6,7 @@ import os
 import secrets
 import uuid
 import weakref
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -23,6 +23,8 @@ from litellm.proxy._types import UserAPIKeyAuth
 from litellm.types.utils import AllMessageValues, CallTypes, CallTypesLiteral, LLMResponseTypes, ModelResponseStream
 
 from . import state
+from .database import load_catalog
+from .discovery import CatalogRow
 from .models import Admission, Denied, Failure, Granted, Limits, Outcome, PoolConfig, Snapshot
 from .recovery import ErrorPolicy, classify, fail, probe_success
 from .request import (
@@ -34,6 +36,7 @@ from .request import (
     Ticket,
     actual_usage,
     has_upstream_override,
+    marked_model,
     raise_public,
     recovery_request,
     safe_id,
@@ -46,12 +49,17 @@ _MESSAGES: Final = TypeAdapter(list[AllMessageValues])
 
 
 class ExclusiveEndpointPool(CustomLogger):
-    def __init__(self, store: RedisPoolStore | None = None) -> None:
+    def __init__(
+        self,
+        store: RedisPoolStore | None = None,
+        catalog_source: Callable[[], Awaitable[tuple[CatalogRow, ...] | Failure]] = load_catalog,
+    ) -> None:
         super().__init__()  # pyright: ignore[reportUnknownMemberType]  # CustomLogger exposes an untyped kwargs initializer
         self.store = store or RedisPoolStore(
             Redis.from_url(os.environ["EXCLUSIVE_POOL_REDIS_URL"], socket_timeout=3, socket_connect_timeout=3),
             PoolConfig.model_validate_json(Path(os.environ["EXCLUSIVE_POOL_CONFIG"]).read_bytes()),
         )
+        self.catalog_source = catalog_source
         self.secret = secrets.token_bytes(32)
         self._tasks: frozenset[asyncio.Task[None]] = frozenset()
         self._recovery: asyncio.Task[None] | None = None
@@ -68,7 +76,8 @@ class ExclusiveEndpointPool(CustomLogger):
         data: Mapping[str, object],
         call_type: CallTypesLiteral,
     ) -> dict[str, object] | None:  # mutable-ok: CustomLogger's request replacement contract requires a dictionary
-        if data.get("model") not in self.store.config.models:
+        config: Final = await self._request_configuration(data.get("model"))
+        if config is None or data.get("model") not in config.models:
             return None
         if has_upstream_override(data):
             raise_public(
@@ -137,9 +146,10 @@ class ExclusiveEndpointPool(CustomLogger):
         request_kwargs: Mapping[str, object] | None = None,
         parent_otel_span: Span | None = None,
     ) -> list[dict[str, object]]:  # mutable-ok: the legacy Router filter requires mutable deployment dictionaries
-        if model not in self.store.config.models:
-            return [dict(deployment) for deployment in healthy_deployments]
         ticket: Final = self._ticket(request_kwargs or {})
+        config: Final = await self._request_configuration(model)
+        if config is None or model not in config.models:
+            return [dict(deployment) for deployment in healthy_deployments]
         if ticket is None:
             raise_public(state.unavailable())
         eligible: Final = tuple(
@@ -175,9 +185,13 @@ class ExclusiveEndpointPool(CustomLogger):
     ) -> None:
         carriers: Final = MetadataCarriers.model_validate(kwargs)
         ticket: Final = carriers.ticket(self.secret)
-        configured: Final = frozenset(r.id for r in self.store.config.resources)
+        snapshot: Final = await self.store.read() if self.store.config.discovery else None
+        if ticket is None and carriers.pool is None and isinstance(snapshot, Failure):
+            return
+        config: Final = self.store.config.resolve(snapshot) if isinstance(snapshot, Snapshot) else self.store.config
+        configured: Final = frozenset(r.id for r in config.resources)
         if ticket is None:
-            if carriers.deployment in configured:
+            if carriers.deployment in configured or carriers.pool is not None:
                 raise_public(state.unavailable())
             return
         updated: Final = await self.store.transact(
@@ -223,7 +237,12 @@ class ExclusiveEndpointPool(CustomLogger):
         policy: Final = classify(exception)
         await self.store.transact(
             lambda snapshot, now: fail(
-                snapshot, self.store.config, ticket.operation, policy, now, (secrets.randbelow(999) + 1) / 10000
+                snapshot,
+                self.store.config.resolve(snapshot),
+                ticket.operation,
+                policy,
+                now,
+                (secrets.randbelow(999) + 1) / 10000,
             )
         )
 
@@ -237,10 +256,10 @@ class ExclusiveEndpointPool(CustomLogger):
         ticket: Final = self._ticket(request_data)
         if ticket is not None:
             await self.store.transact(
-                lambda snapshot, now: state.abort(snapshot, self.store.config, ticket.operation, now)
+                lambda snapshot, now: state.abort(snapshot, self.store.config.resolve(snapshot), ticket.operation, now)
             )
         if (
-            request_data.get("model") in self.store.config.models
+            (ticket is not None or self._protected_model(request_data.get("model")))
             and isinstance(original_exception, litellm.RateLimitError)
             and original_exception.category in ("litellm_rate_limit", "litellm_batch_rate_limit")
         ):
@@ -276,7 +295,7 @@ class ExclusiveEndpointPool(CustomLogger):
                 await self.store.transact(
                     lambda snapshot, now: fail(
                         snapshot,
-                        self.store.config,
+                        self.store.config.resolve(snapshot),
                         ticket.operation,
                         ErrorPolicy(kind="cooldown", confirmed_end=False),
                         now,
@@ -298,9 +317,9 @@ class ExclusiveEndpointPool(CustomLogger):
     async def _complete(self, ticket: Ticket, usage: int | None) -> None:
         await self.store.transact(
             lambda snapshot, now: (
-                probe_success(snapshot, self.store.config, ticket.operation, now)
+                probe_success(snapshot, self.store.config.resolve(snapshot), ticket.operation, now)
                 if ticket.probe
-                else state.complete(snapshot, self.store.config, ticket.operation, now, usage)
+                else state.complete(snapshot, self.store.config.resolve(snapshot), ticket.operation, now, usage)
             )
         )
 
@@ -337,10 +356,49 @@ class ExclusiveEndpointPool(CustomLogger):
     def _ensure_recovery(self) -> None:
         if self._recovery is not None and not self._recovery.done():
             return
-        task: Final = asyncio.create_task(RecoveryWorker(self.store, self._run_probe).run())
+        task: Final = asyncio.create_task(RecoveryWorker(self.store, self._run_probe, self._refresh_catalog).run())
         self._recovery = task
         self._tasks = self._tasks | frozenset((task,))
         task.add_done_callback(self._forget_task)
+
+    def _protected_model(self, model: object) -> bool:
+        if model in self.store.config.models:
+            return True
+        if not self.store.config.discovery:
+            return False
+        from litellm.proxy.proxy_server import llm_router
+
+        if llm_router is None:
+            return False
+        return marked_model(model, getattr(llm_router, "model_list", ()))
+
+    async def _request_configuration(self, model: object) -> PoolConfig | None:
+        if not self.store.config.discovery:
+            return self.store.config if model in self.store.config.models else None
+        snapshot: Final = await self.store.read()
+        known: Final = self.store.config.resolve(snapshot) if isinstance(snapshot, Snapshot) else self.store.config
+        if (
+            not self._protected_model(model)
+            and model not in known.models
+            and model not in tuple(r.id for r in known.resources)
+        ):
+            return None
+        return await self._configuration()
+
+    async def _refresh_catalog(self) -> None:
+        if not self.store.config.discovery:
+            return
+        result: Final = await self.store.synchronize(self.catalog_source)
+        if isinstance(result, Failure):
+            _LOGGER.error("Endpoint pool catalog synchronization unavailable")
+
+    async def _configuration(self) -> PoolConfig:
+        if not self.store.config.discovery:
+            return self.store.config
+        snapshot: Final = await self.store.synchronize(self.catalog_source)
+        if isinstance(snapshot, Failure):
+            raise_public(snapshot)
+        return self.store.config.resolve(snapshot)
 
     async def _run_probe(self, ticket: Ticket) -> bool:
         from litellm.proxy.proxy_server import llm_router

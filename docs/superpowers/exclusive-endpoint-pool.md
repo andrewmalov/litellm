@@ -120,3 +120,9 @@ The [multi-client runner](../../tests/e2e/router/exclusive_endpoint_pool.md) tar
 The integration suite owns a real proxy, two workers, PostgreSQL, Redis and a local upstream. Its tests exercise device rejection before forwarding, primary/fallback assignments, conflicts, quota errors, stream completion and client cancellation. Pure transition tests cover the exact 900-second boundary, stale completion, heartbeat loss, quota reservations, cooldown and probing
 
 Real-provider acceptance and installed Claude client qualification still require operator credentials and compatible clients. The controlled integration suite does not replace those checks
+
+## Automatic upstream discovery
+
+The deployment template now registers upstreams through the standard LiteLLM model API or Admin UI. Add `exclusive_pool` matching the configured pool ID and `exclusive_pool_role` set to `primary` or `fallback` in `model_info`. Discovery is independent of public and provider model names. Addresses and credentials are stored through existing model management rather than individual Compose environment variables
+
+See the [deployment instructions](../../docker/exclusive-pool/README.md) for registration, default limits, refresh timing and migration from a static pool. Static configurations remain supported. Migration preserves Redis ownership and accounting and requires the previous configuration and no outstanding operations

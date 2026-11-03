@@ -35,7 +35,10 @@ def exhausted() -> Failure:
 
 
 def empty_state(config: PoolConfig) -> Snapshot:
-    return Snapshot(fingerprint=config.fingerprint, health=tuple(Health(resource=r.id) for r in config.resources))
+    return Snapshot(
+        fingerprint=config.fingerprint,
+        health=() if config.discovery else tuple(Health(resource=r.id) for r in config.resources),
+    )
 
 
 def _active(state: Snapshot, client: str) -> tuple[Operation, ...]:
@@ -87,7 +90,7 @@ def _resource_available(
         return False
     if len(operations) >= min(resource.limits.parallel, health.capacity or resource.limits.parallel):
         return False
-    if resource.id != config.fallback.id and any(
+    if not config.is_fallback(resource.id) and any(
         s.client != request.client and s.resource == resource.id for s in state.sessions
     ):
         return False
@@ -105,7 +108,13 @@ def _choose(
 ) -> Resource | None:
     if session is not None and session.resource is None and _active(state, request.client):
         return None
-    previous: Final = next((r for r in config.resources if session is not None and r.id == session.resource), None)
+    if (
+        session is not None
+        and session.resource not in tuple(r.id for r in config.selectable)
+        and _active(state, request.client)
+    ):
+        return None
+    previous: Final = next((r for r in config.selectable if session is not None and r.id == session.resource), None)
     if previous is not None and _resource_available(state, config, previous, request, now):
         return previous
     if previous is not None:
@@ -115,7 +124,7 @@ def _choose(
     return next(
         (
             r
-            for r in (*_ordered_primaries(state, config), config.fallback)
+            for r in (*_ordered_primaries(state, config), *((config.fallback,) if config.fallback is not None else ()))
             if _resource_available(state, config, r, request, now)
         ),
         None,
@@ -123,6 +132,8 @@ def _choose(
 
 
 def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float) -> Outcome:
+    if config.discovery and (state.discovered_at is None or now - state.discovered_at >= config.heartbeat_timeout):
+        return Denied(state=state, failure=unavailable())
     if state.fingerprint != config.fingerprint:
         return Denied(state=state, failure=unavailable())
     current: Final = _prune(state, now)
@@ -197,7 +208,7 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
                 ),
             ),
             "cursor": resource.id
-            if resource.id != config.fallback.id and (session is None or session.resource != resource.id)
+            if not config.is_fallback(resource.id) and (session is None or session.resource != resource.id)
             else current.cursor,
         }
     )

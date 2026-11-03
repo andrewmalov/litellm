@@ -157,6 +157,10 @@ def _failed_health(health: Health, operation: Operation, policy: ErrorPolicy, no
 
 
 def claim_probe(state: Snapshot, config: PoolConfig, resource: str, operation: str, now: float) -> Outcome:
+    if resource not in tuple(r.id for r in config.selectable):
+        return Denied(state=state, failure=exhausted())
+    if config.discovery and (state.discovered_at is None or now - state.discovered_at >= config.heartbeat_timeout):
+        return Denied(state=state, failure=exhausted())
     health: Final = next(h for h in state.health if h.resource == resource)
     target: Final = next(r for r in config.resources if r.id == resource)
     scope_ids: Final = frozenset(r.id for r in config.resources if r.scope == target.scope)
@@ -214,7 +218,7 @@ def probe_success(state: Snapshot, config: PoolConfig, operation: str, now: floa
                     update={
                         "status": "ready",
                         "success_since": now,
-                        "capacity": 1 if h.resource == config.fallback.id else None,
+                        "capacity": 1 if config.is_fallback(h.resource) else None,
                     }
                 )
                 if h.resource == active.resource
