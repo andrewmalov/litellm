@@ -179,3 +179,7 @@ docker build --platform linux/amd64 -f Dockerfile.runtime \
 ```
 
 The base must use Python 3.13 and `/app/.venv`. Do not substitute an unrelated LiteLLM release. Publish the image and transfer this directory without `.env` to another host, transferring secrets separately. Set `LITELLM_IMAGE` to the published digest, then follow first-start or migration instructions. `--no-build` leaves build options unused
+
+## Individual key budget policies
+
+See [key-budget-policies.md](key-budget-policies.md) for administrator-owned `5h` and `7d` allowances inherited from teams and organizations

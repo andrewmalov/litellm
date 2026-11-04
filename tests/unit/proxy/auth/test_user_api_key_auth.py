@@ -1900,3 +1900,49 @@ async def test_user_api_key_auth_websocket_rejection_adds_no_traceback_for_other
     proxy_records: Final = [record for record in caplog.records if record.name == verbose_proxy_logger.name]
     assert [record.getMessage() for record in proxy_records if record.exc_info is not None] == []
     assert [record.levelno for record in proxy_records if record.levelno >= logging.WARNING] == [logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_inherited_key_windows_keep_independent_spend(monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from litellm.caching.dual_cache import DualCache
+    from litellm.proxy._types import LiteLLM_TeamTableCachedObj
+    from litellm.proxy.auth.auth_checks import _virtual_key_multi_budget_check
+    from litellm.proxy.auth.user_api_key_auth import _inherit_key_budget_windows
+    from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
+
+    cache: Final = UserApiKeyCache()
+    counters: Final = DualCache()
+    reset: Final = datetime(2030, 1, 7, tzinfo=timezone.utc)
+    team: Final = LiteLLM_TeamTableCachedObj(team_id="team-a", metadata={"key_budget_policy": {"budget_limits": [
+        {"budget_duration": "5h", "max_budget": 10}, {"budget_duration": "7d", "max_budget": 100},
+    ]}})
+    table: Final = SimpleNamespace(
+        find_unique=AsyncMock(side_effect=lambda where: {
+            "token": where["token"], "team_id": "team-a", "organization_id": None, "budget_limits": None,
+        }), update_many=AsyncMock(return_value=1),
+    )
+    client: Final = SimpleNamespace(db=SimpleNamespace(litellm_verificationtoken=table))
+    first: Final = UserAPIKeyAuth(token="a" * 64, team_id="team-a", budget_limits=[
+        {"budget_duration": "5h", "max_budget": 1, "reset_at": reset},
+    ])
+    second: Final = UserAPIKeyAuth(token="b" * 64, team_id="team-a")
+    await cache.async_set_cache(key=first.token, value=first)
+    await cache.async_set_cache(key=second.token, value=second)
+    await _inherit_key_budget_windows(first, team, client, cache)
+    await _inherit_key_budget_windows(second, team, client, cache)
+    assert [w["max_budget"] for w in first.budget_limits] == [10, 100]
+    assert [w["max_budget"] for w in second.budget_limits] == [10, 100]
+    cached: Final = await cache.async_get_cache(key=first.token, model_type=UserAPIKeyAuth)
+    assert cached.budget_limits == first.budget_limits
+    monkeypatch.setattr(litellm.proxy.proxy_server, "prisma_client", None)
+    monkeypatch.setattr(litellm.proxy.proxy_server, "spend_counter_cache", counters)
+    await counters.async_set_cache(key=f"spend:key:{first.token}:window:5h", value=11.0)
+    await counters.async_set_cache(key=f"spend:key:{first.token}:window:7d", value=11.0)
+    await counters.async_set_cache(key=f"spend:key:{second.token}:window:5h", value=0.0)
+    await counters.async_set_cache(key=f"spend:key:{second.token}:window:7d", value=0.0)
+    with pytest.raises(litellm.BudgetExceededError):
+        await _virtual_key_multi_budget_check(first)
+    await _virtual_key_multi_budget_check(second)

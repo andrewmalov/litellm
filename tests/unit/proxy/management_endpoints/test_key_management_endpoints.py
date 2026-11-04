@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import json
 from datetime import datetime, timedelta, timezone
 
+
+
 import litellm
 import pytest
 import yaml
@@ -671,6 +673,7 @@ async def test_generate_key_personal_non_admin_denied_for_team_scoped_fields(
     mock_prisma_client = AsyncMock()
     mock_prisma_client.jsonify_object = lambda data: data  # type: ignore
     mock_prisma_client.db = MagicMock()
+    mock_prisma_client.db.litellm_usertable.find_unique = AsyncMock(return_value=None)
     mock_prisma_client.db.litellm_objectpermissiontable = MagicMock()
     mock_prisma_client.db.litellm_objectpermissiontable.create = AsyncMock(
         return_value=MagicMock(object_permission_id="should-not-create")
@@ -4449,7 +4452,7 @@ async def test_generate_key_team_member_inherits_org_skips_membership_check():
         patch(
             "litellm.proxy.management_endpoints.key_management_endpoints.get_org_object",
             new_callable=AsyncMock,
-            return_value=MagicMock(litellm_budget_table=None),
+            return_value=MagicMock(litellm_budget_table=None, metadata=None),
         ),
         patch(
             "litellm.proxy.management_endpoints.key_management_endpoints._check_org_key_limits",
@@ -4523,7 +4526,7 @@ async def test_generate_key_foreign_org_without_team_still_enforces_membership()
         patch(
             "litellm.proxy.management_endpoints.key_management_endpoints.get_org_object",
             new_callable=AsyncMock,
-            return_value=MagicMock(litellm_budget_table=None),
+            return_value=MagicMock(litellm_budget_table=None, metadata=None),
         ),
         patch(
             "litellm.proxy.management_endpoints.key_management_endpoints._check_org_key_limits",
@@ -4605,7 +4608,7 @@ async def test_generate_key_foreign_org_with_mismatched_team_still_enforces_memb
         patch(
             "litellm.proxy.management_endpoints.key_management_endpoints.get_org_object",
             new_callable=AsyncMock,
-            return_value=MagicMock(litellm_budget_table=None),
+            return_value=MagicMock(litellm_budget_table=None, metadata=None),
         ),
         patch(
             "litellm.proxy.management_endpoints.key_management_endpoints._check_org_key_limits",
@@ -9696,6 +9699,7 @@ async def test_default_key_generate_params_object_permission_not_rejected_for_no
     )
     mock_prisma_client.insert_data = mock_insert_data
     mock_prisma_client.db = MagicMock()
+    mock_prisma_client.db.litellm_usertable.find_unique = AsyncMock(return_value=None)
     mock_prisma_client.db.litellm_verificationtoken = MagicMock()
     mock_prisma_client.db.litellm_verificationtoken.find_unique = AsyncMock(
         return_value=None
@@ -13664,6 +13668,10 @@ def _policy_generate_prisma() -> MagicMock:
     mock_prisma = MagicMock()
     mock_prisma.db.litellm_budgettable.create = AsyncMock(return_value=MagicMock(budget_id="budget-1"))
     mock_prisma.jsonify_object = MagicMock(side_effect=lambda data: json.loads(data) if isinstance(data, str) else data)
+    mock_prisma.db.litellm_organizationtable.find_unique = AsyncMock(return_value=LiteLLM_OrganizationTable(
+        organization_id="org-1", organization_alias="test-org", budget_id="budget-1",
+        created_by="admin", updated_by="admin", metadata={},
+    ))
     return mock_prisma
 
 
@@ -13673,7 +13681,7 @@ def _generate_policy_mocks(mock_prisma: MagicMock, generate_key_helper: AsyncMoc
     stack.enter_context(patch("litellm.proxy.proxy_server.llm_router", None))  # test-quality-ok: no router in test
     stack.enter_context(patch("litellm.proxy.proxy_server.premium_user", True))  # test-quality-ok: premium fields
     stack.enter_context(patch("litellm.proxy.proxy_server.litellm_proxy_admin_name", "admin"))  # test-quality-ok: admin
-    stack.enter_context(patch("litellm.proxy.proxy_server.user_api_key_cache", MagicMock()))  # test-quality-ok: cache
+    stack.enter_context(patch("litellm.proxy.proxy_server.user_api_key_cache", UserApiKeyCache()))  # test-quality-ok: cache
     stack.enter_context(
         patch(  # test-quality-ok: the key write must not run on a denied generate
             "litellm.proxy.management_endpoints.key_management_endpoints.generate_key_helper_fn",
@@ -21248,3 +21256,103 @@ async def test_rotate_master_key_reencrypts_guardrail_params(monkeypatch):
         "guardrail": "bedrock",
         "aws_secret_access_key": "aws-secret",
     }
+
+
+@pytest.mark.asyncio
+async def test_org_admin_cannot_generate_key_with_explicit_budget_windows():
+    with pytest.raises(HTTPException) as error:
+        await _common_key_generation_helper(
+            data=GenerateKeyRequest(team_id="team-a", budget_limits=[]),
+            user_api_key_dict=UserAPIKeyAuth(user_role=LitellmUserRoles.ORG_ADMIN),
+            litellm_changed_by=None, team_table=None,
+        )
+    assert error.value.status_code == 403
+    assert "inherit" in str(error.value.detail)
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["regenerate", "reset"])
+async def test_retained_policy_windows_cannot_be_reset_after_scope_change(operation: str):
+    from litellm.proxy.management_endpoints.key_management_endpoints import _enforce_managed_key_edit
+
+    key: Final = LiteLLM_VerificationToken(
+        token="key-a", team_id="unmanaged-team", org_id="org-a",
+        budget_limits=[{"budget_duration": "5h", "max_budget": 10}, {"budget_duration": "7d", "max_budget": 100}],
+    )
+    with pytest.raises(HTTPException) as error:
+        await _enforce_managed_key_edit(
+            data=None, existing=key,
+            caller=UserAPIKeyAuth(user_role=LitellmUserRoles.INTERNAL_USER, user_id="org-admin"),
+            prisma_client=None, cache=UserApiKeyCache(), operation=operation,
+        )
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_membership_org_admin_cannot_create_an_unscoped_key(monkeypatch):
+    client: Final = MagicMock()
+    client.db.litellm_usertable.find_unique = AsyncMock(return_value=SimpleNamespace(organization_memberships=[
+        SimpleNamespace(organization_id="org-a", user_role=LitellmUserRoles.ORG_ADMIN),
+    ]))
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", client)
+    with pytest.raises(HTTPException) as error:
+        await _common_key_generation_helper(
+            data=GenerateKeyRequest(),
+            user_api_key_dict=UserAPIKeyAuth(user_role=LitellmUserRoles.INTERNAL_USER, user_id="org-admin"),
+            litellm_changed_by=None, team_table=None,
+        )
+    assert error.value.status_code == 403
+    assert "specify" in str(error.value.detail)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("materialized", [True, False])
+async def test_automatic_rotation_cannot_reset_retained_policy_windows(monkeypatch, materialized: bool):
+    from litellm.proxy.management_endpoints.key_management_endpoints import _enforce_managed_key_edit
+
+    key: Final = LiteLLM_VerificationToken(
+        token="key-a", team_id="team-a", auto_rotate=True, rotation_interval="1h",
+        budget_limits=[{"budget_duration": "5h", "max_budget": 10}] if materialized else None,
+    )
+    team: Final = LiteLLM_TeamTableCachedObj(
+        team_id="team-a", metadata={"key_budget_policy": {"budget_limits": [
+            {"budget_duration": "5h", "max_budget": 10},
+            {"budget_duration": "7d", "max_budget": 100},
+        ]}},
+    )
+    monkeypatch.setattr(
+        "litellm.proxy.management_endpoints.key_management_endpoints.get_team_object",
+        AsyncMock(return_value=team),
+    )
+    with pytest.raises(HTTPException) as error:
+        await _enforce_managed_key_edit(
+            data=None, existing=key,
+            caller=UserAPIKeyAuth.get_litellm_internal_jobs_user_api_key_auth(),
+            prisma_client=MagicMock(), cache=UserApiKeyCache(), operation="regenerate",
+        )
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_default_team_policy_rejects_explicit_key_budget_override(monkeypatch):
+    team: Final = LiteLLM_TeamTableCachedObj(
+        team_id="default-team", metadata={"key_budget_policy": {"budget_limits": [
+            {"budget_duration": "5h", "max_budget": 10},
+            {"budget_duration": "7d", "max_budget": 100},
+        ]}},
+    )
+    monkeypatch.setattr(litellm, "default_key_generate_params", {"team_id": team.team_id})
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", MagicMock())
+    monkeypatch.setattr(
+        "litellm.proxy.management_endpoints.key_management_endpoints.get_team_object",
+        AsyncMock(return_value=team),
+    )
+    with pytest.raises(HTTPException) as error:
+        await _common_key_generation_helper(
+            data=GenerateKeyRequest(budget_limits=[]),
+            user_api_key_dict=UserAPIKeyAuth(user_role=LitellmUserRoles.INTERNAL_USER),
+            litellm_changed_by=None, team_table=None,
+        )
+    assert error.value.status_code == 403
+    assert "inherit" in str(error.value.detail)

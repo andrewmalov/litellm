@@ -1,3 +1,5 @@
+from litellm.proxy.management_helpers.key_budget_policy import enforce_policy_authority, policy_metadata
+
 """
 TEAM MANAGEMENT
 
@@ -1505,6 +1507,12 @@ async def new_team(
             user_api_key_dict=user_api_key_dict,
             entity="team",
         )
+        enforce_policy_authority(
+            requested_metadata=policy_metadata(data),
+            existing_metadata=None,
+            metadata_present="metadata" in data.model_fields_set,
+            role=user_api_key_dict.user_role,
+        )
         enforce_batch_limits_are_admin_only(
             data=data,
             existing_metadata=None,
@@ -1591,6 +1599,11 @@ async def new_team(
                     detail=f"Organization not found for organization_id={data.organization_id}",
                 )
 
+            if (
+                user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN
+                and (policy_metadata(org_table) or {}).get("key_budget_policy") is not None
+            ):
+                raise HTTPException(403, "Only proxy admins can create teams in organizations with key budget policies")
             await _check_org_team_limits(
                 org_table=org_table,
                 data=data,
@@ -2292,6 +2305,18 @@ async def update_team(
             user_api_key_dict=user_api_key_dict,
             entity="team",
         )
+        enforce_policy_authority(
+            requested_metadata=policy_metadata(data),
+            existing_metadata=policy_metadata(existing_team),
+            metadata_present="metadata" in data.model_fields_set,
+            role=user_api_key_dict.user_role,
+        )
+        if (
+            access_role == "org_admin"
+            and "organization_id" in data.model_fields_set
+            and data.organization_id != existing_team_row.organization_id
+        ):
+            raise HTTPException(403, "Organization admins cannot change a team's organization")
         enforce_batch_limits_are_admin_only(
             data=data,
             existing_metadata=_existing_team_metadata if isinstance(_existing_team_metadata, dict) else None,

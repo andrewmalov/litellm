@@ -36,6 +36,7 @@ from litellm._uuid import uuid
 from litellm.caching.dual_cache import DualCache
 from litellm.constants import (
     LENGTH_OF_LITELLM_GENERATED_KEY,
+    LITELLM_INTERNAL_JOBS_SERVICE_ACCOUNT_NAME,
     LITELLM_PROXY_ADMIN_NAME,
     MINIMUM_CUSTOM_KEY_LENGTH,
     UI_SESSION_TOKEN_TEAM_ID,
@@ -119,6 +120,15 @@ from litellm.proxy.management_helpers.access_group_key_sync import (
     sync_key_access_group_membership,
     sync_key_regeneration_access_group_membership,
     sync_key_update_access_group_membership,
+)
+from litellm.proxy.management_helpers.key_budget_policy import (
+    admin_organization_ids,
+    enforce_key_budget_authority,
+    inherited_budget_windows,
+    key_organization_id,
+    policy_metadata,
+    requests_key_budget_change,
+    stored_key_window_entries,
 )
 from litellm.proxy.management_helpers.key_settings_audit import with_settings_updated_at
 from litellm.proxy.management_helpers.object_permission_utils import (  # noqa: F401  # legacy module exports
@@ -1199,6 +1209,75 @@ def _enforce_upperbound_key_params(
                         )
 
 
+async def _enforce_managed_key_edit(
+    *,
+    data: UpdateKeyRequest | RegenerateKeyRequest | None,
+    existing: LiteLLM_VerificationToken,
+    caller: UserAPIKeyAuth,
+    prisma_client: PrismaClient | None,
+    cache: UserApiKeyCache,
+    operation: Literal["update", "regenerate", "reset"] = "update",
+) -> None:
+    if (
+        caller.user_role == LitellmUserRoles.PROXY_ADMIN
+        and caller.api_key != LITELLM_INTERNAL_JOBS_SERVICE_ACCOUNT_NAME
+    ):
+        return
+    if operation != "update" and caller.user_role == LitellmUserRoles.ORG_ADMIN:
+        raise HTTPException(403, "Organization admins cannot regenerate keys or reset spend")
+    if operation == "update" and data is not None and not requests_key_budget_change(data):
+        return
+    retained_windows: Final = stored_key_window_entries(existing)
+    if retained_windows:
+        if operation != "update":
+            raise HTTPException(403, "Only proxy admins can regenerate keys with budget windows or reset their spend")
+        if data is not None:
+            enforce_key_budget_authority(
+                data=data,
+                caller=caller,
+                existing_org_id=key_organization_id(existing),
+                managed=True,
+            )
+            if "team_id" not in data.model_fields_set:
+                return
+    org_id: Final = key_organization_id(existing)
+    team: Final = (
+        await get_team_object(team_id=existing.team_id, prisma_client=prisma_client, user_api_key_cache=cache)
+        if existing.team_id and prisma_client is not None
+        else None
+    )
+    organization: Final = (
+        await get_org_object(org_id=org_id, prisma_client=prisma_client, user_api_key_cache=cache)
+        if not existing.team_id and org_id and prisma_client is not None
+        else None
+    )
+    managed: Final = (
+        inherited_budget_windows(
+            team_id=existing.team_id,
+            team_metadata=policy_metadata(team),
+            organization_metadata=policy_metadata(organization),
+            existing_windows=None,
+            next_reset=get_budget_reset_time,
+        )
+        is not None
+    )
+    if not managed and not retained_windows:
+        return
+    if operation != "update":
+        raise HTTPException(403, "Only proxy admins can regenerate policy keys or reset their spend")
+    if data is not None:
+        enforce_key_budget_authority(data=data, caller=caller, existing_org_id=org_id, managed=True)
+        if "team_id" in data.model_fields_set and data.team_id and data.team_id != existing.team_id:
+            destination: Final = await get_team_object(
+                team_id=data.team_id,
+                prisma_client=prisma_client,
+                user_api_key_cache=cache,
+            )
+            source_org: Final = key_organization_id(team) if team is not None else org_id
+            if destination.organization_id != source_org:
+                raise HTTPException(403, "Policy keys must remain in their organization")
+
+
 async def _common_key_generation_helper(
     data: GenerateKeyRequest,
     user_api_key_dict: UserAPIKeyAuth,
@@ -1212,6 +1291,9 @@ async def _common_key_generation_helper(
         premium_user,
         prisma_client,
     )
+
+    requested_policy_fields: Final = frozenset(data.model_fields_set)
+    enforce_key_budget_authority(data=data, caller=user_api_key_dict)
 
     common_key_access_checks(
         user_api_key_dict=user_api_key_dict,
@@ -1366,6 +1448,89 @@ async def _common_key_generation_helper(
         verbose_proxy_logger.debug(
             "litellm.proxy.proxy_server.generate_key_fn(): Enterprise key management params not applied - %s", e
         )
+
+    effective_team: Final = (
+        await get_team_object(
+            team_id=data.team_id,
+            prisma_client=prisma_client,
+            user_api_key_cache=proxy_server.user_api_key_cache,
+        )
+        if data.team_id and data.team_id != _requested_team_id
+        else team_table
+    )
+    if data.team_id != _requested_team_id and effective_team is not None and data.organization_id is None:
+        data.organization_id = effective_team.organization_id  # rebind-ok: generation persists the resolved scope
+
+    if (
+        user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN
+        and user_api_key_dict.user_id
+        and not data.team_id
+        and not data.organization_id
+        and prisma_client is not None
+    ):
+        caller_row: Final = await _prisma_table(UserRepository(prisma_client)).find_unique(
+            where={"user_id": user_api_key_dict.user_id},
+            include={"organization_memberships": True},
+        )
+        if admin_organization_ids(caller_row):
+            raise HTTPException(403, "Organization admins must specify team_id or organization_id")
+
+    if data.organization_id is not None and prisma_client:
+        # Mirror the membership rule applied to /key/update: when the
+        # caller specifies an organization_id, require that they are a
+        # member of (or proxy admin over) the target organization.
+        _is_proxy_admin: Final = (
+            user_api_key_dict.user_role is not None
+            and user_api_key_dict.user_role == LitellmUserRoles.PROXY_ADMIN.value
+        )
+        _org_inherited_from_team: Final = (
+            effective_team is not None
+            and effective_team.organization_id is not None
+            and data.organization_id == effective_team.organization_id
+        )
+        if not _is_proxy_admin and not _org_inherited_from_team:
+            await _validate_caller_can_assign_key_org(
+                user_api_key_dict=user_api_key_dict,
+                organization_id=data.organization_id,
+                prisma_client=prisma_client,
+            )
+
+    org_table: Final = (
+        await get_org_object(
+            org_id=data.organization_id,
+            user_api_key_cache=proxy_server.user_api_key_cache,
+            prisma_client=prisma_client,
+        )
+        if data.organization_id and prisma_client
+        else None
+    )
+    if data.organization_id and prisma_client:
+        if org_table is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Organization not found for organization_id={data.organization_id}",
+            )
+        await _check_org_key_limits(
+            org_table=org_table,
+            data=data,
+            prisma_client=prisma_client,
+        )
+
+    inherited_windows: Final = inherited_budget_windows(
+        team_id=data.team_id,
+        team_metadata=policy_metadata(effective_team),
+        organization_metadata=policy_metadata(org_table),
+        existing_windows=None,
+        next_reset=get_budget_reset_time,
+    )
+    if inherited_windows is not None:
+        enforce_key_budget_authority(
+            data=data,
+            caller=user_api_key_dict,
+            managed=True,
+            requested_fields=requested_policy_fields,
+        )
+        data.budget_limits = list(inherited_windows)  # rebind-ok: generation helper serializes this request
 
     await _enforce_custom_key_policy(
         hook=_custom_key_policy_hook(proxy_server),
@@ -1531,46 +1696,6 @@ async def _common_key_generation_helper(
                 "error": f"Invalid key format. LiteLLM Virtual Key must be at least {MINIMUM_CUSTOM_KEY_LENGTH} characters long."
             },
         )
-
-    # check org key limits - done here to handle inheriting org id from team
-    if data.organization_id is not None:
-        from litellm.proxy.proxy_server import prisma_client, user_api_key_cache
-
-        if prisma_client:
-            # Mirror the membership rule applied to /key/update: when the
-            # caller specifies an organization_id, require that they are a
-            # member of (or proxy admin over) the target organization.
-            _is_proxy_admin: Final = (
-                user_api_key_dict.user_role is not None
-                and user_api_key_dict.user_role == LitellmUserRoles.PROXY_ADMIN.value
-            )
-            _org_inherited_from_team: Final = (
-                team_table is not None
-                and team_table.organization_id is not None
-                and data.organization_id == team_table.organization_id
-            )
-            if not _is_proxy_admin and not _org_inherited_from_team:
-                await _validate_caller_can_assign_key_org(
-                    user_api_key_dict=user_api_key_dict,
-                    organization_id=data.organization_id,
-                    prisma_client=prisma_client,
-                )
-
-            org_table: Final = await get_org_object(
-                org_id=data.organization_id,
-                user_api_key_cache=user_api_key_cache,
-                prisma_client=prisma_client,
-            )
-            if org_table is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Organization not found for organization_id={data.organization_id}",
-                )
-            await _check_org_key_limits(
-                org_table=org_table,
-                data=data,
-                prisma_client=prisma_client,
-            )
 
     response = await generate_key_helper_fn(request_type="key", **data_json, table_name="key", llm_router=llm_router)
 
@@ -2775,6 +2900,12 @@ async def _process_single_key_update(
             prisma_client=prisma_client,
         )
 
+    enforce_key_budget_authority(
+        data=update_key_request,
+        caller=user_api_key_dict,
+        existing_org_id=key_organization_id(existing_key_row),
+    )
+
     check_disable_global_guardrails_caller_permission(
         update_key_request.disable_global_guardrails,
         update_key_request.metadata,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # request models declare `metadata` as bare dict
@@ -2863,6 +2994,14 @@ async def _process_single_key_update(
         prisma_client=prisma_client,
         user_api_key_cache=user_api_key_cache,
         user_api_key_dict=user_api_key_dict,
+    )
+
+    await _enforce_managed_key_edit(
+        data=update_key_request,
+        existing=existing_key_row,
+        caller=user_api_key_dict,
+        prisma_client=prisma_client,
+        cache=user_api_key_cache,
     )
 
     # Prepare update data
@@ -3107,6 +3246,10 @@ async def _validate_update_key_data(
     user_api_key_cache: UserApiKeyCache,
 ) -> None:
     """Validate permissions and constraints for key update."""
+    enforce_key_budget_authority(
+        data=data, caller=user_api_key_dict, existing_org_id=key_organization_id(existing_key_row)
+    )
+
     checked_prisma_client: Final = _require_prisma_client(prisma_client)
 
     # Reject NaN/±inf spend before it can reach the DB / spend counter.
@@ -3388,6 +3531,14 @@ async def _validate_update_key_data(
         )
         if normalized_object_permission is not None:
             data.object_permission = LiteLLM_ObjectPermissionBase(**normalized_object_permission)
+
+    await _enforce_managed_key_edit(
+        data=data,
+        existing=existing_key_row,
+        caller=user_api_key_dict,
+        prisma_client=prisma_client,
+        cache=user_api_key_cache,
+    )
 
 
 @router.post("/key/update", tags=["key management"], dependencies=[Depends(user_api_key_auth)])
@@ -5652,6 +5803,20 @@ async def _execute_virtual_key_regeneration(
             prisma_client=prisma_client,
         )
 
+    if data is not None:
+        enforce_key_budget_authority(
+            data=data, caller=user_api_key_dict, existing_org_id=key_organization_id(key_in_db)
+        )
+
+    await _enforce_managed_key_edit(
+        data=data,
+        existing=key_in_db,
+        caller=user_api_key_dict,
+        prisma_client=prisma_client,
+        cache=user_api_key_cache,
+        operation="regenerate",
+    )
+
     new_token: Final = await get_new_token(data=data)
     new_token_hash: Final = hash_token(new_token)
     new_token_key_name: Final = abbreviate_api_key(api_key=new_token)
@@ -6251,6 +6416,8 @@ async def reset_key_spend_fn(
         description="The litellm-changed-by header enables tracking of actions performed by authorized users on behalf of other users, providing an audit trail for accountability",
     ),
 ) -> dict[str, Any]:
+    if user_api_key_dict.user_role == LitellmUserRoles.ORG_ADMIN:
+        raise HTTPException(403, "Organization admins cannot reset key spend")
     try:
         from litellm.proxy.proxy_server import (
             hash_token,
@@ -6288,6 +6455,15 @@ async def reset_key_spend_fn(
             user_api_key_dict=user_api_key_dict,
             prisma_client=prisma_client,
             user_api_key_cache=user_api_key_cache,
+        )
+
+        await _enforce_managed_key_edit(
+            data=None,
+            existing=_key_in_db,
+            caller=user_api_key_dict,
+            prisma_client=prisma_client,
+            cache=user_api_key_cache,
+            operation="reset",
         )
 
         updated_key: Final = await _prisma_table(VerificationTokenRepository(prisma_client)).update(

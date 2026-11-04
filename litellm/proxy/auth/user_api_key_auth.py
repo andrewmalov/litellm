@@ -144,10 +144,12 @@ from litellm.proxy.common_utils.realtime_utils import (  # noqa: F401  # legacy 
     _realtime_request_body,  # pyright: ignore[reportPrivateUsage,reportUnusedImport]  # backwards-compatible package export
     realtime_request_body,
 )
+from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time
 from litellm.proxy.common_utils.user_api_key_cache import (
     UserApiKeyCache,
     end_user_cache_key,
     end_user_restricted_registry_cache_key,
+    is_user_key_cache_key,
     model_access_group_registry_cache_key,
     team_membership_auth_cache_key,
 )
@@ -155,6 +157,12 @@ from litellm.proxy.db.db_lookup_gate import bounded_db_lookup
 from litellm.proxy.db.db_span import db_span
 from litellm.proxy.db.exception_handler import PrismaDBExceptionHandler
 from litellm.proxy.litellm_pre_call_utils import LiteLLMProxyRequestSetup
+from litellm.proxy.management_helpers.key_budget_policy import (
+    inherited_budget_windows,
+    policy_metadata,
+    stored_key_window_entries,
+    synchronize_inherited_key_windows,
+)
 from litellm.proxy.spend_tracking.carried_budget_state import carry_team_and_user_budget_state
 from litellm.proxy.spend_tracking.spend_counter_batch import (
     bind_admission_counter_keys,
@@ -2788,14 +2796,53 @@ def _token_can_vouch_for_team(valid_token: UserAPIKeyAuth, lookup_error: BaseExc
     return PrismaDBExceptionHandler.should_allow_request_on_db_unavailable()
 
 
-async def _inherit_org_identity(
+async def _inherit_key_budget_windows(
+    token: UserAPIKeyAuth,
+    team: LiteLLM_TeamTableCachedObj | None,
+    prisma_client: PrismaClient | None,
+    cache: UserApiKeyCache,
+    organization_metadata: object = None,
+) -> None:
+    if token.token is None or not is_user_key_cache_key(token.token) or prisma_client is None:
+        return
+    preview: Final = inherited_budget_windows(
+        team_id=token.team_id,
+        team_metadata=policy_metadata(team),
+        organization_metadata=organization_metadata,
+        existing_windows=stored_key_window_entries(token),
+        next_reset=get_budget_reset_time,
+    )
+    if preview is None or preview == stored_key_window_entries(token):
+        return
+    windows: Final = await synchronize_inherited_key_windows(
+        token=token.token,
+        team_id=token.team_id,
+        org_id=token.org_id,
+        team_metadata=policy_metadata(team),
+        organization_metadata=organization_metadata,
+        existing_windows=stored_key_window_entries(token),
+        table=VerificationTokenRepository(prisma_client).table,
+        next_reset=get_budget_reset_time,
+    )
+    if windows is None or windows == stored_key_window_entries(token):
+        return
+    cached: Final = await cache.async_get_cache(key=token.token, model_type=UserAPIKeyAuth)
+    effective: Final = [window.model_dump(mode="json") for window in windows]
+    await cache.async_set_cache(
+        key=token.token,
+        value=(cached or token).model_copy(update={"budget_limits": effective}),
+    )
+    token.budget_limits = effective  # rebind-ok: admission and downstream reservations share this auth object
+
+
+async def _load_org_identity(
     user_api_key_auth_obj: UserAPIKeyAuth,
     team_object: LiteLLM_TeamTableCachedObj | None,
     prisma_client: PrismaClient | None,
     user_api_key_cache: UserApiKeyCache,
     parent_otel_span: Span | None,
     proxy_logging_obj: ProxyLogging | None,
-) -> None:
+) -> Mapping[str, object] | None:
     if user_api_key_auth_obj.org_id is None and team_object is not None and team_object.organization_id is not None:
         user_api_key_auth_obj.org_id = team_object.organization_id
     already_populated: Final = any(
@@ -2808,7 +2855,10 @@ async def _inherit_org_identity(
             user_api_key_auth_obj.organization_metadata,
         )
     )
-    if user_api_key_auth_obj.org_id is None or already_populated or prisma_client is None:
+    refresh_policy: Final = user_api_key_auth_obj.team_id is None and is_user_key_cache_key(
+        user_api_key_auth_obj.token or ""
+    )
+    if user_api_key_auth_obj.org_id is None or (already_populated and not refresh_policy) or prisma_client is None:
         return
     org_object: Final = await get_org_object_for_request(
         org_id=user_api_key_auth_obj.org_id,
@@ -2819,14 +2869,42 @@ async def _inherit_org_identity(
     )
     if org_object is None:
         return
+    if already_populated:
+        return policy_metadata(org_object)
     user_api_key_auth_obj.organization_alias = org_object.organization_alias
     user_api_key_auth_obj.organization_metadata = org_object.metadata
     budget: Final = org_object.litellm_budget_table
     if budget is None:
-        return
+        return policy_metadata(org_object)
     user_api_key_auth_obj.organization_max_budget = budget.max_budget
     user_api_key_auth_obj.organization_tpm_limit = budget.tpm_limit
     user_api_key_auth_obj.organization_rpm_limit = budget.rpm_limit
+    return policy_metadata(org_object)
+
+
+async def _inherit_org_identity(
+    user_api_key_auth_obj: UserAPIKeyAuth,
+    team_object: LiteLLM_TeamTableCachedObj | None,
+    prisma_client: PrismaClient | None,
+    user_api_key_cache: UserApiKeyCache,
+    parent_otel_span: Span | None,
+    proxy_logging_obj: ProxyLogging | None,
+) -> None:
+    metadata: Final = await _load_org_identity(
+        user_api_key_auth_obj,
+        team_object,
+        prisma_client,
+        user_api_key_cache,
+        parent_otel_span,
+        proxy_logging_obj,
+    )
+    await _inherit_key_budget_windows(
+        user_api_key_auth_obj,
+        team_object,
+        prisma_client,
+        user_api_key_cache,
+        metadata,
+    )
 
 
 def is_no_auth_dev_mode(master_key: str | None, general_settings: Mapping[str, object]) -> bool:

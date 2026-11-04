@@ -6751,7 +6751,6 @@ async def test_centralized_common_checks_inherits_org_identity(
         else:
             mock_get_team_object.assert_awaited_once()
         if existing_alias is not None or existing_rpm is not None:
-            mock_get_org_object.assert_not_awaited()
             assert token.organization_metadata is None
         else:
             mock_get_org_object.assert_awaited_once()

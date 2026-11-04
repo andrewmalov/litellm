@@ -1573,3 +1573,35 @@ async def test_delete_organization_evicts_the_cache_of_the_keys_it_deletes(monke
     assert all(cache.get_cache(key=cache_key) is None for cache_key in doomed_cache_keys)
     assert all(cache.get_cache(key=cache_key) == {"retained": True} for cache_key in kept_cache_keys)
     assert jwt_table.rows == (kept_row,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata", [None, {}, {"key_budget_policy": None}])
+async def test_membership_org_admin_cannot_remove_default_key_policy(monkeypatch, metadata: object):
+    from datetime import datetime, timezone
+    from litellm.proxy._types import LiteLLM_UserTable, OrganizationUpdateRequestV2, UserAPIKeyAuth
+    from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
+    from litellm.proxy.management_endpoints.organization_endpoints import update_organization_v2
+
+    cache: Final = UserApiKeyCache()
+    stamp: Final = datetime(2030, 1, 7, tzinfo=timezone.utc)
+    await cache.async_set_cache(key="delegated-admin", value=LiteLLM_UserTable(
+        user_id="delegated-admin", user_email="delegated@example.invalid", organization_memberships=[{
+            "user_id": "delegated-admin", "organization_id": "org-a", "user_role": "org_admin",
+            "created_at": stamp, "updated_at": stamp,
+        }],
+    ))
+    policy: Final = {"key_budget_policy": {"budget_limits": [
+        {"budget_duration": "5h", "max_budget": 10}, {"budget_duration": "7d", "max_budget": 100},
+    ]}}
+    client: Final = MagicMock()
+    client.db.litellm_organizationtable.find_unique = AsyncMock(return_value=SimpleNamespace(metadata=policy))
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", client)
+    monkeypatch.setattr("litellm.proxy.proxy_server.user_api_key_cache", cache)
+    with pytest.raises(HTTPException) as error:
+        await update_organization_v2(
+            organization_id="org-a", data=OrganizationUpdateRequestV2.model_validate({"metadata": metadata}),
+            user_api_key_dict=UserAPIKeyAuth(user_id="delegated-admin", user_role="internal_user"),
+        )
+    assert error.value.status_code == 403
+    assert "key_budget_policy" in str(error.value.detail)

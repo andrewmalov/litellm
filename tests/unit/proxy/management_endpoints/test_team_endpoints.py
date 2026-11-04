@@ -16852,3 +16852,37 @@ def test_aggregated_date_range_error_accepts_canonical_dates_and_keeps_range_che
     assert aggregated_date_range_error("2026-09-24", "2026-09-26") is None
     assert aggregated_date_range_error("2026-09-26", "2026-09-24") == "end_date must be on or after start_date"
     assert aggregated_date_range_error("2020-01-01", "2026-12-31") == "Date range must be at most 400 days"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", [{"metadata": {}}, {"organization_id": None}])
+async def test_membership_org_admin_cannot_remove_key_policy_or_detach_team(monkeypatch, change: dict[str, object]):
+    from fastapi import Request
+    from litellm.proxy._types import LiteLLM_TeamTable, LiteLLM_UserTable, UpdateTeamRequest, UserAPIKeyAuth
+    from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
+    from litellm.proxy.management_endpoints.team_endpoints import update_team
+
+    cache: Final = UserApiKeyCache()
+    stamp: Final = datetime(2030, 1, 7, tzinfo=timezone.utc)
+    await cache.async_set_cache(key="delegated-admin", value=LiteLLM_UserTable(
+        user_id="delegated-admin", user_email="delegated@example.invalid", organization_memberships=[{
+            "user_id": "delegated-admin", "organization_id": "org-a", "user_role": "org_admin",
+            "created_at": stamp, "updated_at": stamp,
+        }],
+    ))
+    policy: Final = {"key_budget_policy": {"budget_limits": [
+        {"budget_duration": "5h", "max_budget": 10}, {"budget_duration": "7d", "max_budget": 100},
+    ]}}
+    client: Final = MagicMock()
+    client.db.litellm_teamtable.find_unique = AsyncMock(return_value=LiteLLM_TeamTable(
+        team_id="team-a", organization_id="org-a", metadata=policy,
+    ))
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", client)
+    monkeypatch.setattr("litellm.proxy.proxy_server.user_api_key_cache", cache)
+    with pytest.raises(ProxyException) as error:
+        await update_team(
+            data=UpdateTeamRequest.model_validate({"team_id": "team-a", **change}),
+            http_request=Request({"type": "http", "method": "POST", "path": "/team/update", "headers": []}),
+            user_api_key_dict=UserAPIKeyAuth(user_id="delegated-admin", user_role="internal_user"),
+        )
+    assert str(error.value.code) == "403"

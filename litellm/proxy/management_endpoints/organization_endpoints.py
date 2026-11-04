@@ -1,5 +1,7 @@
 import math
 
+from litellm.proxy.management_helpers.key_budget_policy import enforce_policy_authority, policy_metadata
+
 """
 Endpoints for /organization operations
 
@@ -457,6 +459,13 @@ async def new_organization(
             detail={"error": f"Only admins can create orgs. Your role is = {user_api_key_dict.user_role}"},
         )
 
+    enforce_policy_authority(
+        requested_metadata=policy_metadata(data),
+        existing_metadata=None,
+        metadata_present="metadata" in data.model_fields_set,
+        role=user_api_key_dict.user_role,
+    )
+
     if llm_router is None:
         raise HTTPException(status_code=500, detail={"error": CommonProxyErrors.no_llm_router.value})
 
@@ -768,6 +777,13 @@ async def update_organization(
     if existing_organization_row is None:
         raise ValueError(f"Organization not found for organization_id={data.organization_id}")
 
+    enforce_policy_authority(
+        requested_metadata=policy_metadata(data),
+        existing_metadata=policy_metadata(existing_organization_row),
+        metadata_present="metadata" in data.model_fields_set,
+        role=user_api_key_dict.user_role,
+    )
+
     updated_organization_row_json: Final = data.model_dump(exclude_none=True)
     # Merge metadata from existing organization with updated metadata
     if updated_organization_row_json.get("metadata") is not None:
@@ -946,6 +962,13 @@ async def update_organization_v2(
             status_code=404,
             detail={"error": f"Organization not found for organization_id={organization_id}"},
         )
+
+    enforce_policy_authority(
+        requested_metadata=policy_metadata(data),
+        existing_metadata=policy_metadata(existing_organization_row),
+        metadata_present="metadata" in data.model_fields_set,
+        role=user_api_key_dict.user_role,
+    )
 
     field_values: Final = _STR_OBJECT_DICT_ADAPTER.validate_python(data.model_dump())
     present_fields: Final = data.model_fields_set
