@@ -90,17 +90,22 @@ def _resource_available(
         return False
     if len(operations) >= min(resource.limits.parallel, health.capacity or resource.limits.parallel):
         return False
-    if not config.is_fallback(resource.id) and any(
-        s.client != request.client and s.resource == resource.id for s in state.sessions
-    ):
-        return False
+    if not config.is_fallback(resource.id):
+        upstream_ids: Final = config.upstream_deployments(resource.upstream_id)
+        if any(s.client != request.client and s.resource in upstream_ids for s in state.sessions):
+            return False
+        if any(op.client != request.client and op.resource in upstream_ids for op in state.operations):
+            return False
     return has_capacity(state, f"resource:{resource.scope}", resource.limits, request.tokens, now, request.operation)
 
 
 def _ordered_primaries(state: Snapshot, config: PoolConfig) -> tuple[Resource, ...]:
-    ids: Final = tuple(r.id for r in config.primaries)
-    offset: Final = ids.index(state.cursor) + 1 if state.cursor in ids else 0
-    return (*config.primaries[offset:], *config.primaries[:offset])
+    upstreams: Final = tuple(dict.fromkeys(r.upstream_id for r in config.primaries))
+    previous: Final = next((r.upstream_id for r in config.resources if r.id == state.cursor), None)
+    offset: Final = upstreams.index(previous) + 1 if previous in upstreams else 0
+    ordered: Final = (*upstreams[offset:], *upstreams[:offset])
+    ranks: Final = {upstream: index for index, upstream in enumerate(ordered)}
+    return tuple(sorted(config.primaries, key=lambda resource: ranks[resource.upstream_id]))
 
 
 def _choose(
@@ -108,23 +113,21 @@ def _choose(
 ) -> Resource | None:
     if session is not None and session.resource is None and _active(state, request.client):
         return None
-    if (
-        session is not None
-        and session.resource not in tuple(r.id for r in config.selectable)
-        and _active(state, request.client)
-    ):
-        return None
-    previous: Final = next((r for r in config.selectable if session is not None and r.id == session.resource), None)
-    if previous is not None and _resource_available(state, config, previous, request, now):
-        return previous
+    previous: Final = next((r for r in config.resources if session is not None and r.id == session.resource), None)
     if previous is not None:
-        prior_health: Final = next(h for h in state.health if h.resource == previous.id)
-        if prior_health.status == "ready" or any(op.resource == previous.id for op in state.operations):
+        siblings: Final = tuple(r for r in config.selectable if r.upstream_id == previous.upstream_id)
+        selected: Final = next((r for r in siblings if _resource_available(state, config, r, request, now)), None)
+        if selected is not None:
+            return selected
+        sibling_ids: Final = frozenset(r.id for r in siblings)
+        if any(h.status == "ready" and h.resource in sibling_ids for h in state.health) or _active(
+            state, request.client
+        ):
             return None
     return next(
         (
             r
-            for r in (*_ordered_primaries(state, config), *((config.fallback,) if config.fallback is not None else ()))
+            for r in (*_ordered_primaries(state, config), *config.fallbacks)
             if _resource_available(state, config, r, request, now)
         ),
         None,
@@ -259,13 +262,15 @@ def complete(
     remaining: Final = tuple(op for op in state.operations if op.id != operation)
     client_still_active: Final = any(op.client == active.client for op in remaining)
     resource: Final = next(r for r in config.resources if r.id == active.resource)
+    upstream_ids: Final = config.upstream_deployments(resource.upstream_id)
     return state.model_copy(
         update={
             "operations": remaining,
             "sessions": tuple(_finish_session(s, active, client_still_active, now) for s in state.sessions),
             "charges": tuple(_settle(c, active, resource, now, actual_tokens) for c in state.charges),
             "health": tuple(
-                _released_probe(_successful_health(h, active, resource, now), active) for h in state.health
+                _released_probe(_successful_health(h, active, resource, upstream_ids, now), active)
+                for h in state.health
             ),
         }
     )
@@ -310,8 +315,10 @@ def _released_probe(health: Health, operation: Operation) -> Health:
     return health
 
 
-def _successful_health(health: Health, operation: Operation, resource: Resource, now: float) -> Health:
-    if health.resource != operation.resource or health.status != "ready" or operation.probe:
+def _successful_health(
+    health: Health, operation: Operation, resource: Resource, upstream_ids: frozenset[str], now: float
+) -> Health:
+    if health.resource not in upstream_ids or health.status != "ready" or operation.probe:
         return health
     successful_since: Final = health.success_since if health.success_since is not None else now
     return health.model_copy(

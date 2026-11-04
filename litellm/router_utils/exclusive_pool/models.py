@@ -34,6 +34,7 @@ class PoolConfig(FrozenModel):
     models: tuple[str, ...] = ()
     primaries: tuple[Resource, ...] = ()
     fallback: Resource | None = None
+    fallback_aliases: tuple[Resource, ...] = ()
     discovery: bool = False
     primary_limits: Limits = Field(default_factory=Limits)
     fallback_limits: Limits = Field(default_factory=Limits)
@@ -51,10 +52,17 @@ class PoolConfig(FrozenModel):
 
     @property
     def selectable(self) -> tuple[Resource, ...]:
-        return (*self.primaries, *((self.fallback,) if self.fallback is not None else ()))
+        return (*self.primaries, *self.fallbacks)
+
+    @property
+    def fallbacks(self) -> tuple[Resource, ...]:
+        return (*((self.fallback,) if self.fallback is not None else ()), *self.fallback_aliases)
 
     def is_fallback(self, resource: str) -> bool:
-        return self.fallback is not None and resource == self.fallback.id
+        return any(resource == fallback.id for fallback in self.fallbacks)
+
+    def upstream_deployments(self, upstream_id: str) -> frozenset[str]:
+        return frozenset(resource.id for resource in self.resources if resource.upstream_id == upstream_id)
 
     def resolve(self, snapshot: Snapshot) -> PoolConfig:
         if not self.discovery:
@@ -64,6 +72,9 @@ class PoolConfig(FrozenModel):
                 "models": tuple(sorted(frozenset((*self.models, *(entry.model for entry in snapshot.catalog))))),
                 "primaries": tuple(e.resource for e in snapshot.catalog if e.active and e.role == "primary"),
                 "fallback": next((e.resource for e in snapshot.catalog if e.active and e.role == "fallback"), None),
+                "fallback_aliases": tuple(e.resource for e in snapshot.catalog if e.active and e.role == "fallback")[
+                    1:
+                ],
                 "retired": tuple(e.resource for e in snapshot.catalog if not e.active),
             }
         )
@@ -71,9 +82,9 @@ class PoolConfig(FrozenModel):
     @property
     def fingerprint(self) -> str:
         excluded: Final = (
-            {"models", "primaries", "fallback", "retired"}
+            {"models", "primaries", "fallback", "fallback_aliases", "retired"}
             if self.discovery
-            else {"discovery", "primary_limits", "fallback_limits", "retired"}
+            else {"discovery", "primary_limits", "fallback_limits", "fallback_aliases", "retired"}
         )
         return hashlib.sha256(self.model_dump_json(exclude=excluded).encode()).hexdigest()
 
@@ -83,7 +94,13 @@ class PoolConfig(FrozenModel):
             "static pool is incomplete"
         )
         assert len(frozenset(r.id for r in self.resources)) == len(self.resources), "deployment IDs must be unique"
-        assert len(frozenset(r.upstream_id for r in self.resources)) == len(self.resources), "upstreams must be unique"
+        assert self.discovery or (
+            not self.fallback_aliases and len(frozenset(r.upstream_id for r in self.resources)) == len(self.resources)
+        ), "static upstreams must be unique"
+        assert all(_same_upstream_policy(resource, self.resources) for resource in self.resources), (
+            "physical upstream policy differs"
+        )
+        assert len(frozenset(r.upstream_id for r in self.fallbacks)) <= 1, "only one physical fallback is supported"
         assert self.heartbeat_timeout > self.heartbeat_seconds, "heartbeat timeout must exceed its interval"
         assert all(_same_scope_limits(resource, self.resources) for resource in self.resources), (
             "shared quota limits differ"
@@ -108,6 +125,14 @@ class PoolConfig(FrozenModel):
 
 def _same_scope_limits(resource: Resource, resources: tuple[Resource, ...]) -> bool:
     return all(other.limits == resource.limits for other in resources if other.scope == resource.scope)
+
+
+def _same_upstream_policy(resource: Resource, resources: tuple[Resource, ...]) -> bool:
+    return all(
+        (other.scope, other.limits) == (resource.scope, resource.limits)
+        for other in resources
+        if other.upstream_id == resource.upstream_id
+    )
 
 
 class Failure(FrozenModel):

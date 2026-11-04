@@ -120,7 +120,7 @@ def fail(
     affected: Final = (
         frozenset(r.id for r in config.resources if r.scope == resource.scope)
         if policy.shared_quota
-        else frozenset((resource.id,))
+        else config.upstream_deployments(resource.upstream_id)
     )
     audited: Final = record_event(
         ended, config, Event(time=now, kind=f"upstream_{policy.kind}", client=active.client, resource=resource.id)
@@ -163,6 +163,7 @@ def claim_probe(state: Snapshot, config: PoolConfig, resource: str, operation: s
         return Denied(state=state, failure=exhausted())
     health: Final = next(h for h in state.health if h.resource == resource)
     target: Final = next(r for r in config.resources if r.id == resource)
+    upstream_ids: Final = config.upstream_deployments(target.upstream_id)
     scope_ids: Final = frozenset(r.id for r in config.resources if r.scope == target.scope)
     if health.status != "cooldown" or health.retry_at > now or any(op.resource in scope_ids for op in state.operations):
         return Denied(state=state, failure=exhausted())
@@ -185,7 +186,9 @@ def claim_probe(state: Snapshot, config: PoolConfig, resource: str, operation: s
         state=state.model_copy(
             update={
                 "health": tuple(
-                    h.model_copy(update={"status": "probing", "generation": operation}) if h.resource == resource else h
+                    h.model_copy(update={"status": "probing", "generation": operation})
+                    if h.resource in upstream_ids
+                    else h
                     for h in state.health
                 ),
                 "operations": (*state.operations, probe),
@@ -211,6 +214,13 @@ def probe_success(state: Snapshot, config: PoolConfig, operation: str, now: floa
     if health.status != "probing" or health.generation != active.health_generation:
         return state
     ended: Final = complete(state, config, operation, now)
+    target: Final = next(r for r in config.resources if r.id == active.resource)
+    upstream_ids: Final = config.upstream_deployments(target.upstream_id)
+    fallback: Final = (
+        any(entry.resource.id == active.resource and entry.role == "fallback" for entry in state.catalog)
+        if config.discovery
+        else config.is_fallback(active.resource)
+    )
     return ended.model_copy(
         update={
             "health": tuple(
@@ -218,10 +228,10 @@ def probe_success(state: Snapshot, config: PoolConfig, operation: str, now: floa
                     update={
                         "status": "ready",
                         "success_since": now,
-                        "capacity": 1 if config.is_fallback(h.resource) else None,
+                        "capacity": 1 if fallback else None,
                     }
                 )
-                if h.resource == active.resource
+                if h.resource in upstream_ids
                 else h
                 for h in ended.health
             ),
@@ -230,11 +240,17 @@ def probe_success(state: Snapshot, config: PoolConfig, operation: str, now: floa
 
 
 def enable(state: Snapshot, resource: str, generation: str) -> Snapshot:
+    upstream: Final = next((e.resource.upstream_id for e in state.catalog if e.resource.id == resource), None)
+    affected: Final = (
+        frozenset(e.resource.id for e in state.catalog if e.resource.upstream_id == upstream)
+        if upstream is not None
+        else frozenset((resource,))
+    )
     return state.model_copy(
         update={
             "health": tuple(
                 h.model_copy(update={"status": "cooldown", "retry_at": 0, "generation": generation})
-                if h.resource == resource and h.status == "disabled"
+                if h.resource in affected and h.status == "disabled"
                 else h
                 for h in state.health
             ),

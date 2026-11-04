@@ -53,7 +53,7 @@ In the Admin UI, add a model normally, expand advanced settings and put this JSO
 }
 ```
 
-For the shared reserve, use role `fallback`. At most one active fallback is supported per pool. Primaries can serve without a fallback. An empty pool or a pool without a matching available resource fails closed
+For the shared reserve, use role `fallback`. At most one active physical fallback is supported per pool, with several model registrations allowed on it. Primaries can serve without a fallback. An empty pool or a pool without a matching available resource fails closed
 
 Automation uses the standard `/model/new` endpoint. This example needs `jq`. Set `MODEL_NAME` to the public name clients request, `PROVIDER_MODEL` to the provider-prefixed upstream model, `UPSTREAM_BASE_URL` to the complete API base path, `UPSTREAM_API_KEY` to its credential and `DEPLOYMENT_ID` to a unique stable ID. For an OpenAI-compatible upstream, the provider prefix is `openai/` and the base path usually includes `/v1`. Use the model your upstream supports, checking its current documentation
 
@@ -72,13 +72,49 @@ jq -n \
       -H 'Content-Type: application/json' --data-binary @-
 ```
 
-Repeat with a new deployment ID for each resource, using `exclusive_pool_role: "fallback"` for the reserve. These are administrative writes; clients must never receive the master key
+Repeat with a new deployment ID for each model on each resource, using `exclusive_pool_role: "fallback"` for the reserve. These are administrative writes; clients must never receive the master key
+
+### Several models on one upstream
+
+Use `cr.selcloud.ru/ttkdc/litellm:exclusive-pool-multimodel-20261104` or a newer release containing this feature. Register each supported model separately with a unique `model_info.id`, and use the same `exclusive_upstream_id` for every model on that physical upstream. Keep the public and provider model names unchanged. For two upstreams serving `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`, create six records with two physical upstream IDs
+
+For an OpenAI-compatible upstream, this shell function registers the three models through the existing API:
+
+```bash
+register_upstream() {
+  local upstream_id="$1" base_url="$2" api_key="$3" role="${4:-primary}"
+  local model
+  for model in claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5; do
+    jq -n \
+      --arg upstream "$upstream_id" --arg url "$base_url" \
+      --arg key "$api_key" --arg role "$role" --arg model "$model" \
+      '{model_name: $model,
+        litellm_params: {model: ("openai/" + $model), api_base: $url, api_key: $key, max_retries: 0},
+        model_info: {id: ($upstream + "-" + $model), exclusive_pool: "exclusive",
+          exclusive_pool_role: $role, exclusive_upstream_id: $upstream}}' \
+      | curl --fail-with-body http://127.0.0.1:4000/model/new \
+          -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+          -H 'Content-Type: application/json' --data-binary @- || return
+  done
+}
+
+register_upstream upstream-a "$UPSTREAM_A_BASE_URL" "$UPSTREAM_A_API_KEY"
+register_upstream upstream-b "$UPSTREAM_B_BASE_URL" "$UPSTREAM_B_API_KEY"
+```
+
+Supply the two API base URLs and credentials in the shell running registration, without adding them to Compose. The function assumes the pool ID is `exclusive`. For an Anthropic-native upstream, use the matching LiteLLM provider prefix and API base instead of `openai/`
+
+A client assigned upstream-a can request any of its registered models and stays on upstream-a, including with concurrent requests. Another client receives upstream-b. With two primaries and no fallback, a third client receives `endpoint_pool_exhausted`. All model registrations on one upstream share parallel, RPM and TPM limits and quarantine. If the assigned healthy upstream lacks the requested model, the request fails with `endpoint_pool_exhausted` until the session expires or normal failover becomes possible
+
+Model registrations on the same physical upstream must have the same role, effective quota scope and limits. Set a common `exclusive_quota_scope` only when distinct physical upstreams also share an account quota. That shared quota does not merge their exclusive ownership
+
+To upgrade an existing discovery deployment, stop incoming traffic, drain operations and replace all proxy workers before adding model aliases. Preserve Redis and PostgreSQL volumes and the existing `pool.json`; initialization and reconfiguration are unnecessary for this code upgrade. Do not mix old and new workers with multi-model registrations. For an existing registration, reuse its current `exclusive_upstream_id`, which defaults to its deployment ID, for the new sibling models
 
 Create client virtual keys through `/key/generate`. Clients request the registered public model name at `/v1/chat/completions`, authenticating with their virtual key and supplying `metadata.user_id` as a JSON string containing `device_id`. See the [multi-client runner](../../tests/e2e/router/exclusive_endpoint_pool.md) for provider acceptance. Scripted upstream tests do not qualify real providers or installed Claude clients
 
 The catalog refreshes every `heartbeat_seconds`, 10 seconds by default. Worker-local Router refreshes can add further delay before every worker can use a new deployment. Admission requires a deployment to exist in both the shared catalog and the worker's eligible list. Adding capacity preserves existing client assignments. Unmarked deployments sharing the model name cannot be selected by the pool
 
-Optional `model_info.exclusive_pool_limits` overrides resource `parallel`, `rpm` and `tpm`. `exclusive_upstream_id` identifies the physical resource and defaults to the deployment ID. Do not register one physical resource under multiple IDs. `exclusive_quota_scope` can group distinct resources sharing an account quota, with identical limits in that scope
+Optional `model_info.exclusive_pool_limits` overrides resource `parallel`, `rpm` and `tpm`. `exclusive_upstream_id` identifies the physical resource and defaults to the deployment ID. Every model on the same physical resource must use the same upstream ID. Distinct upstream IDs must represent independently ownable physical resources. `exclusive_quota_scope` can group distinct resources sharing an account quota, with identical limits in that scope
 
 Only DB-backed deployments participate in discovery. Static YAML configurations remain supported with `discovery: false`
 
@@ -139,7 +175,7 @@ Supply that compatible base by digest and record the source revision:
 docker build --platform linux/amd64 -f Dockerfile.runtime \
   --build-arg BASE_IMAGE="$TRUSTED_BASE_IMAGE_DIGEST" \
   --build-arg SOURCE_REVISION="$(git -C ../.. rev-parse HEAD)" \
-  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-discovery-20261103 ../..
+  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-multimodel-20261104 ../..
 ```
 
 The base must use Python 3.13 and `/app/.venv`. Do not substitute an unrelated LiteLLM release. Publish the image and transfer this directory without `.env` to another host, transferring secrets separately. Set `LITELLM_IMAGE` to the published digest, then follow first-start or migration instructions. `--no-build` leaves build options unused

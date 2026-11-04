@@ -12,6 +12,64 @@ from litellm.router_utils.exclusive_pool.models import Admission, Denied, Failur
 from litellm.router_utils.exclusive_pool.store import RedisPoolStore
 
 
+@pytest.mark.asyncio
+async def test_concurrent_model_admissions_lock_physical_upstreams_across_coordinators(store: RedisPoolStore) -> None:
+    from litellm.router_utils.exclusive_pool.discovery import CatalogRow
+
+    config: Final = PoolConfig(pool_id=f"{store.config.pool_id}-models", discovery=True, client_limits=Limits())
+    coordinator: Final = RedisPoolStore(store.redis, config)
+    peer: Final = RedisPoolStore(store.redis, config)
+    models: Final = ("opus", "sonnet", "haiku")
+
+    def rows_for(upstream: str) -> tuple[CatalogRow, ...]:
+        return tuple(
+            CatalogRow(
+                model_id=f"{upstream}-{model}",
+                model_name=model,
+                model_info={
+                    "exclusive_pool": config.pool_id,
+                    "exclusive_pool_role": "primary",
+                    "exclusive_upstream_id": upstream,
+                },
+            )
+            for model in models
+        )
+
+    async def catalog() -> tuple[CatalogRow, ...]:
+        return (*rows_for("a"), *rows_for("b"))
+
+    try:
+        assert not isinstance(await coordinator.initialize(), Failure)
+        assert not isinstance(await coordinator.synchronize(catalog), Failure)
+        replies: Final = await asyncio.gather(
+            *(
+                (coordinator if index % 2 else peer).acquire(
+                    Admission(
+                        client=str(index),
+                        device="d",
+                        operation=str(index),
+                        tokens=1,
+                        eligible=(f"a-{models[index % len(models)]}", f"b-{models[index % len(models)]}"),
+                    )
+                )
+                for index in range(12)
+            )
+        )
+        granted: Final = tuple(reply for reply in replies if isinstance(reply, Granted))
+        assert len(granted) == 2
+        assert frozenset(reply.resource.split("-", 1)[0] for reply in granted) == frozenset(("a", "b"))
+        assert sum(isinstance(reply, Denied) for reply in replies) == len(replies) - len(granted)
+        winner: Final = granted[0]
+        owner: Final = next(op.client for op in winner.state.operations if op.id == winner.operation)
+        switched: Final = await peer.acquire(
+            Admission(client=owner, device="d", operation="switch", tokens=1, eligible=("a-haiku", "b-haiku"))
+        )
+        assert isinstance(switched, Granted)
+        assert switched.resource.split("-", 1)[0] == winner.resource.split("-", 1)[0]
+    finally:
+        await store.redis.delete(coordinator.key)
+
+
 @pytest_asyncio.fixture(loop_scope="function")
 async def store() -> AsyncIterator[RedisPoolStore]:
     config: Final = PoolConfig(

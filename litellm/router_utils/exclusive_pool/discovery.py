@@ -55,7 +55,10 @@ def discover(rows: tuple[CatalogRow, ...], config: PoolConfig) -> tuple[CatalogE
         )
         if len(frozenset(e.resource.id for e in entries)) != len(entries):
             return unavailable()
-        if sum(entry.active and entry.role == "fallback" for entry in entries) > 1:
+        if (
+            len(frozenset(entry.resource.upstream_id for entry in entries if entry.active and entry.role == "fallback"))
+            > 1
+        ):
             return unavailable()
         return tuple(sorted(entries, key=lambda entry: entry.resource.id))
     except ValidationError:
@@ -79,17 +82,14 @@ def reconcile(
         entry.model_copy(update={"active": False}) for entry in snapshot.catalog if entry.resource.id not in incoming
     )
     combined: Final = tuple(sorted((*catalog, *retained), key=lambda entry: entry.resource.id))
+    if any(not _consistent_role(entry, combined) for entry in combined):
+        return unavailable()
     updated: Final = snapshot.model_copy(
         update={
             "catalog": combined,
             "discovered_at": now,
             "catalog_generation": snapshot.catalog_generation + 1,
-            "health": tuple(
-                next(
-                    (h for h in snapshot.health if h.resource == entry.resource.id), Health(resource=entry.resource.id)
-                )
-                for entry in combined
-            ),
+            "health": tuple(_inherited_health(entry, snapshot) for entry in combined),
         }
     )
     try:
@@ -97,3 +97,23 @@ def reconcile(
     except ValidationError:
         return unavailable()
     return updated
+
+
+def _consistent_role(entry: CatalogEntry, catalog: tuple[CatalogEntry, ...]) -> bool:
+    return all(
+        other.role == entry.role for other in catalog if other.resource.upstream_id == entry.resource.upstream_id
+    )
+
+
+def _inherited_health(entry: CatalogEntry, snapshot: Snapshot) -> Health:
+    siblings: Final = frozenset(
+        previous.resource.id
+        for previous in snapshot.catalog
+        if previous.resource.upstream_id == entry.resource.upstream_id
+    )
+    inherited: Final = next((health for health in snapshot.health if health.resource in siblings), None)
+    return (
+        inherited.model_copy(update={"resource": entry.resource.id})
+        if inherited
+        else Health(resource=entry.resource.id)
+    )

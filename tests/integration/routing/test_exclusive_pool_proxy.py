@@ -29,6 +29,7 @@ class Rig:
     proxy: Gateway
     config: PoolConfig
     calls: queue.SimpleQueue[str]
+    upstream_models: queue.SimpleQueue[str]
     stream_release: threading.Event
     fail_primary: threading.Event
     upstream: str
@@ -69,6 +70,7 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
     pool_config: Final = tmp_path / "pool.json"
     pool_config.write_text(config.model_dump_json())
     calls: Final = queue.SimpleQueue[str]()
+    upstream_models: Final = queue.SimpleQueue[str]()
     app: Final = FastAPI()
     stream_release: Final = threading.Event()
     fail_primary: Final = threading.Event()
@@ -78,6 +80,7 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
         body: Final = await request.json()
         assert "exclusive_endpoint_pool" not in str(body)
         calls.put(resource)
+        upstream_models.put(body["model"])
         if resource == config.primaries[0].id and fail_primary.is_set():
             fail_primary.clear()
             return JSONResponse(status_code=503, content={"error": {"message": "overloaded", "type": "server_error"}})
@@ -193,7 +196,7 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
                                     },
                                 },
                             )
-                    yield Rig(proxy, config, calls, stream_release, fail_primary, upstream)
+                    yield Rig(proxy, config, calls, upstream_models, stream_release, fail_primary, upstream)
                 finally:
                     stream_release.set()
                     if dynamic:
@@ -422,4 +425,71 @@ def test_unmarked_model_keeps_serving_when_pool_state_is_lost(rig: Rig) -> None:
         assert redis.exists(state_key) == 0
     finally:
         rig.proxy.post("/model/delete", {"id": identifier})
+        redis.close()
+
+
+@pytest.mark.parametrize("rig", [True], indirect=True)
+def test_multiple_models_share_physical_ownership_through_standard_model_api(rig: Rig) -> None:
+    aliases: Final = ("sonnet", "haiku")
+    public_models: Final = (rig.config.models[0], *(f"{rig.config.models[0]}-{model}" for model in aliases))
+    keys: Final = tuple(str(rig.proxy.post("/key/generate", {"models": list(public_models)})["key"]) for _ in range(4))
+    redis: Final = Redis(host=os.environ["REDIS_HOST"], port=int(os.environ["REDIS_PORT"]))
+    state_key: Final = f"litellm:exclusive-pool:{{{rig.config.pool_id}}}:state"
+    try:
+        for resource in rig.config.resources:
+            for model in aliases:
+                rig.proxy.post(
+                    "/model/new",
+                    {
+                        "model_name": f"{rig.config.models[0]}-{model}",
+                        "litellm_params": {
+                            "model": f"openai/exclusive-test-{model}",
+                            "api_base": f"{rig.upstream}/{resource.id}/v1",
+                            "api_key": "synthetic",
+                            "max_retries": 0,
+                            "input_cost_per_token": 0,
+                            "output_cost_per_token": 0,
+                        },
+                        "model_info": {
+                            "id": f"{resource.id}-{model}",
+                            "exclusive_pool": rig.config.pool_id,
+                            "exclusive_pool_role": "fallback" if rig.config.is_fallback(resource.id) else "primary",
+                            "exclusive_upstream_id": resource.id,
+                            "exclusive_pool_limits": resource.limits.model_dump(),
+                        },
+                    },
+                )
+        eventually(
+            lambda: Snapshot.model_validate_json(redis.get(state_key)),
+            lambda snapshot: len(snapshot.catalog) == len(rig.config.resources) * len(public_models),
+        )
+        first: Final = rig.chat(keys[0], "device")
+        assert first.status_code == 200, first.text
+        assert first.headers["x-litellm-model-id"] == rig.config.primaries[0].id
+        assert rig.upstream_models.get(timeout=5) == "exclusive-test-model"
+        for model in aliases:
+            switched: Final = eventually(
+                lambda: rig.chat(keys[0], "device", model=f"{rig.config.models[0]}-{model}"),
+                lambda reply: reply.status_code == 200,
+            )
+            assert switched.headers["x-litellm-model-id"] == f"{rig.config.primaries[0].id}-{model}", switched.text
+            assert switched.json()["choices"][0]["message"]["content"] == rig.config.primaries[0].id
+            assert rig.upstream_models.get(timeout=5) == f"exclusive-test-{model}"
+        second: Final = rig.chat(keys[1], "device", model=public_models[1])
+        assert second.status_code == 200, second.text
+        assert second.headers["x-litellm-model-id"] == f"{rig.config.primaries[1].id}-sonnet"
+        reserve: Final = rig.chat(keys[2], "device", model=public_models[2])
+        assert reserve.status_code == 200, reserve.text
+        assert rig.config.fallback is not None
+        assert reserve.headers["x-litellm-model-id"] == f"{rig.config.fallback.id}-haiku"
+        shared: Final = rig.chat(keys[3], "device", model=public_models[1])
+        assert shared.status_code == 200, shared.text
+        assert shared.headers["x-litellm-model-id"] == f"{rig.config.fallback.id}-sonnet"
+        conflict: Final = rig.chat(keys[0], "other-device", model=public_models[2])
+        assert conflict.status_code == 409, conflict.text
+    finally:
+        rig.proxy.post("/key/delete", {"keys": list(keys)})
+        for resource in rig.config.resources:
+            for model in aliases:
+                rig.proxy.post("/model/delete", {"id": f"{resource.id}-{model}"})
         redis.close()
