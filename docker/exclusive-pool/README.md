@@ -167,7 +167,7 @@ docker compose build proxy
 
 Release Rust compilation needs substantially more memory than proxy runtime. An 8 GB Docker VM failed locally during compilation; prefer a native x86 builder with sufficient memory
 
-For this discovery release, `Dockerfile.runtime` can reuse the trusted linux/amd64 runtime built at `ea57c0345c`. Dependencies, Rust, enterprise code and proxy extras remain unchanged. It copies all changed production Python modules and preserves the compiled extension and UI. For future changes, recheck the full production diff before reusing this method
+For this release, `Dockerfile.runtime` can reuse the trusted linux/amd64 runtime built at `ea57c0345c`. Dependencies, Rust, enterprise code and proxy extras remain unchanged. It copies all changed production Python modules and preserves the compiled extension and UI. For future changes, recheck the full production diff before reusing this method
 
 Supply that compatible base by digest and record the source revision:
 
@@ -175,7 +175,7 @@ Supply that compatible base by digest and record the source revision:
 docker build --platform linux/amd64 -f Dockerfile.runtime \
   --build-arg BASE_IMAGE="$TRUSTED_BASE_IMAGE_DIGEST" \
   --build-arg SOURCE_REVISION="$(git -C ../.. rev-parse HEAD)" \
-  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-multimodel-20261104 ../..
+  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-key-policies-20261105 ../..
 ```
 
 The base must use Python 3.13 and `/app/.venv`. Do not substitute an unrelated LiteLLM release. Publish the image and transfer this directory without `.env` to another host, transferring secrets separately. Set `LITELLM_IMAGE` to the published digest, then follow first-start or migration instructions. `--no-build` leaves build options unused

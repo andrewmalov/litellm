@@ -1,5 +1,7 @@
 # Individual key budget policies
 
+Available in `cr.selcloud.ru/ttkdc/litellm:exclusive-pool-key-policies-20261105` for `linux/amd64`
+
 Set `metadata.key_budget_policy` on a team to apply the same individual allowances to every key on that team. Set it on an organization to supply allowances for keys without a team. Aggregate team and organization budgets remain separate
 
 Only a proxy administrator can configure or remove a policy. Policies require exactly two windows, `5h` and `7d`, with positive finite dollar amounts
