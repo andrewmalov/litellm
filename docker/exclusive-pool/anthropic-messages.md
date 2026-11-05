@@ -6,7 +6,7 @@ The pool accepts text, client `tool_use` / `tool_result` history, thinking block
 
 Before generating a request with attachments or server state, the pool calls `POST /v1/messages/count_tokens` on the selected physical upstream using its own credentials. It atomically reserves the counted input plus the allowed output against both key and upstream TPM limits. System prompts, tools, thinking settings and output configuration are included in counting. A missing, failing or malformed count endpoint returns HTTP 503 with `pool_token_count_unavailable` before generation. A key TPM overflow returns HTTP 429; upstream capacity exhaustion returns HTTP 503. Unsent reservations are released
 
-Every upstream used for these requests must expose the Anthropic Count Tokens endpoint at the same API base as generation. A Chat Completions-only upstream remains usable for text requests but needs this additional endpoint for attachments. The pool delegates media fetching to the upstream and does not download arbitrary client URLs itself
+Every upstream used for these requests must expose the Anthropic Count Tokens endpoint at the same API base as generation. The pool delegates media fetching to the upstream and does not download arbitrary client URLs itself
 
 Provider `file_id`, `container_upload`, server tool results and existing `container` references require a live assignment on the same key and device. The caller must create or upload these objects on that assigned physical upstream. The pool neither discovers their owner nor copies provider files or execution containers between accounts. The standard Files API does not automatically select an exclusive-pool assignment
 
@@ -16,22 +16,15 @@ An existing server reference without a live assignment returns HTTP 409 with `po
 
 Keep a stable `metadata.user_id` containing JSON with a `device_id`, or configure and send the pool's `device_header`. Reusing a key from a different device still returns HTTP 409
 
-For an OpenAI-compatible upstream serving Chat Completions, keep its `openai/` provider prefix and API base ending in `/v1`. Add this setting to the deployed proxy YAML, as included in the Compose template:
+Use the native `anthropic/` provider prefix and the API root without a trailing `/v1`, or the full URL ending in `/v1/messages`. The default registration example already does this. Public model names such as `claude-opus-5-5` stay unchanged, and no separate pool or key is needed
 
-```yaml
-litellm_settings:
-  use_chat_completions_url_for_anthropic_messages: true
-  callbacks:
-    - litellm.router_utils.exclusive_pool.configured.callback
-```
+For existing registrations, set `litellm_params.model` to `anthropic/<existing public model name>` and normalize `litellm_params.api_base` to that same upstream's API root through the standard model management API or UI. Keep the deployment ID, credentials and all `exclusive_*` labels. This changes the provider transport while preserving the physical upstream and pool assignments
 
-Without this setting, LiteLLM uses the Responses API when adapting Anthropic requests for OpenAI providers. Upstreams that serve only Chat Completions will reject that route
-
-For an Anthropic-native upstream, use the `anthropic/` provider prefix and the API root without a trailing `/v1`, or the full URL ending in `/v1/messages`. No separate pool or key is needed
+The deployment template uses native Messages directly. Remove `litellm_settings.use_chat_completions_url_for_anthropic_messages` from older mounted proxy configurations. That switch selected a translation bridge for upstreams that only expose Chat Completions; these upstreams expose Messages themselves
 
 Streaming responses retain Anthropic SSE events. The pool waits for `message_stop` before releasing an operation. Interrupted streams retain the existing quarantine behavior. Input reservation includes the system prompt, conversation and tool definitions; usage settlement includes cached input tokens. For portable context, a confirmed upstream failure moves the next request under the existing pool rules and never silently replays a partially generated request
 
-Use image `cr.selcloud.ru/ttkdc/litellm:exclusive-pool-media-20261105` or its published digest. Update the proxy YAML setting above when deploying over an existing installation; changing the image alone does not replace mounted configuration. Replace all workers sharing pool Redis state together, since older workers do not preserve the new reservation and affinity fields
+Use image `cr.selcloud.ru/ttkdc/litellm:exclusive-pool-media-20261105` or its published digest. Update the model registrations and mounted proxy YAML as described above when deploying over an existing installation; changing the image alone does not replace mounted configuration. Replace all workers sharing pool Redis state together, since older workers do not preserve the new reservation and affinity fields
 
 To check generation, set `PROXY_URL`, `LITELLM_API_KEY` and `MODEL_NAME` to your deployment values and run:
 

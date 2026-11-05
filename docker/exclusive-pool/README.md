@@ -89,7 +89,7 @@ register_upstream() {
       --arg upstream "$upstream_id" --arg url "$base_url" \
       --arg key "$api_key" --arg role "$role" --arg model "$model" \
       '{model_name: $model,
-        litellm_params: {model: ("openai/" + $model), api_base: $url, api_key: $key, max_retries: 0},
+        litellm_params: {model: ("anthropic/" + $model), api_base: ($url | sub("/v1/?$"; "")), api_key: $key, max_retries: 0},
         model_info: {id: ($upstream + "-" + $model), exclusive_pool: "exclusive",
           exclusive_pool_role: $role, exclusive_upstream_id: $upstream}}' \
       | curl --fail-with-body http://127.0.0.1:4000/model/new \
@@ -102,7 +102,7 @@ register_upstream upstream-a "$UPSTREAM_A_BASE_URL" "$UPSTREAM_A_API_KEY"
 register_upstream upstream-b "$UPSTREAM_B_BASE_URL" "$UPSTREAM_B_API_KEY"
 ```
 
-Supply the two API base URLs and credentials in the shell running registration, without adding them to Compose. The function assumes the pool ID is `exclusive`. For an Anthropic-native upstream, use the matching LiteLLM provider prefix and API base instead of `openai/`
+Supply the two API base URLs and credentials in the shell running registration, without adding them to Compose. The function assumes the pool ID is `exclusive`. Registrations use the native `anthropic/` provider. Supply the API root; the function also accepts and removes a trailing `/v1`. Public model names stay unchanged
 
 A client assigned upstream-a can request any of its registered models and stays on upstream-a, including with concurrent requests. Another client receives upstream-b. With two primaries and no fallback, a third client receives `endpoint_pool_exhausted`. All model registrations on one upstream share parallel, RPM and TPM limits and quarantine. If the assigned healthy upstream lacks the requested model, the request fails with `endpoint_pool_exhausted` until the session expires or normal failover becomes possible
 
@@ -110,7 +110,7 @@ Model registrations on the same physical upstream must have the same role, effec
 
 To upgrade an existing discovery deployment, stop incoming traffic, drain operations and replace all proxy workers before adding model aliases. Preserve Redis and PostgreSQL volumes and the existing `pool.json`; initialization and reconfiguration are unnecessary for this code upgrade. Do not mix old and new workers with multi-model registrations. For an existing registration, reuse its current `exclusive_upstream_id`, which defaults to its deployment ID, for the new sibling models
 
-Create client virtual keys through `/key/generate`. Clients request the registered public model name at `/v1/chat/completions`, authenticating with their virtual key and supplying `metadata.user_id` as a JSON string containing `device_id`. See the [multi-client runner](../../tests/e2e/router/exclusive_endpoint_pool.md) for provider acceptance. Scripted upstream tests do not qualify real providers or installed Claude clients
+Create client virtual keys through `/key/generate`. Claude Desktop requests the registered public model name at `/v1/messages?beta=true`, authenticating with their virtual key and supplying `metadata.user_id` as a JSON string containing `device_id`. See the [multi-client runner](../../tests/e2e/router/exclusive_endpoint_pool.md) for provider acceptance. Scripted upstream tests do not qualify real providers or installed Claude clients
 
 The catalog refreshes every `heartbeat_seconds`, 10 seconds by default. Worker-local Router refreshes can add further delay before every worker can use a new deployment. Admission requires a deployment to exist in both the shared catalog and the worker's eligible list. Adding capacity preserves existing client assignments. Unmarked deployments sharing the model name cannot be selected by the pool
 
