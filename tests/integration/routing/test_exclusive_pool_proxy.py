@@ -35,6 +35,9 @@ class Rig:
     fail_primary: threading.Event
     upstream: str
     payloads: queue.SimpleQueue[Mapping[str, JsonValue]]
+    counts: queue.SimpleQueue[tuple[str, Mapping[str, JsonValue]]]
+    count_betas: queue.SimpleQueue[frozenset[str]]
+    generation_betas: queue.SimpleQueue[frozenset[str]]
 
     def chat(self, key: str, device: str | None, **extra: object) -> httpx.Response:
         return self.proxy.request(
@@ -91,14 +94,29 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
     calls: Final = queue.SimpleQueue[str]()
     payloads: Final = queue.SimpleQueue[Mapping[str, JsonValue]]()
     upstream_models: Final = queue.SimpleQueue[str]()
+    counts: Final = queue.SimpleQueue[tuple[str, Mapping[str, JsonValue]]]()
+    count_betas: Final = queue.SimpleQueue[frozenset[str]]()
+    generation_betas: Final = queue.SimpleQueue[frozenset[str]]()
     app: Final = FastAPI()
     stream_release: Final = threading.Event()
     fail_primary: Final = threading.Event()
+
+    @app.post("/{resource}/v1/messages/count_tokens", response_model=None)
+    async def count_tokens(resource: str, request: Request) -> JSONResponse:
+        body: Final = TypeAdapter(dict[str, JsonValue]).validate_python(await request.json())
+        assert "exclusive_endpoint_pool" not in str(body)
+        assert request.headers.get("x-api-key") == "synthetic"
+        counts.put((resource, body))
+        count_betas.put(frozenset(request.headers.get("anthropic-beta", "").split(",")))
+        if body.get("system") == "count-unavailable":
+            return JSONResponse(status_code=501, content={"error": {"message": "not implemented"}})
+        return JSONResponse(content={"input_tokens": 61000 if body.get("system") == "count-too-large" else 100})
 
     @app.post("/{resource}/v1/messages", response_model=None)
     @app.post("/{resource}/v1/chat/completions", response_model=None)
     async def generate(resource: str, request: Request) -> dict[str, object] | StreamingResponse | JSONResponse:
         body: Final = await request.json()
+        generation_betas.put(frozenset(request.headers.get("anthropic-beta", "").split(",")) - {""})
         assert "exclusive_endpoint_pool" not in str(body)
         payloads.put(TypeAdapter(dict[str, JsonValue]).validate_python(body))
         calls.put(resource)
@@ -261,7 +279,19 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
                                     },
                                 },
                             )
-                    yield Rig(proxy, config, calls, upstream_models, stream_release, fail_primary, upstream, payloads)
+                    yield Rig(
+                        proxy,
+                        config,
+                        calls,
+                        upstream_models,
+                        stream_release,
+                        fail_primary,
+                        upstream,
+                        payloads,
+                        counts,
+                        count_betas,
+                        generation_betas,
+                    )
                 finally:
                     stream_release.set()
                     if dynamic:
@@ -664,5 +694,161 @@ def test_messages_tool_history_reaches_the_assigned_upstream(rig: Rig) -> None:
         assert "Answer briefly" in json.dumps(payload)
         assert "exclusive_endpoint_pool" not in json.dumps(payload)
         assert response.headers["x-litellm-model-id"] == rig.config.primaries[0].id
+    finally:
+        rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize("rig", ["anthropic"], indirect=True)
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
+        {"type": "image", "source": {"type": "url", "url": "https://example.invalid/image.png"}},
+        {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "cGRm"}},
+        {"type": "document", "source": {"type": "url", "url": "https://example.invalid/file.pdf"}},
+        {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "document text"}},
+    ],
+)
+def test_messages_attachments_are_counted_on_assigned_account_and_forwarded_unchanged(
+    rig: Rig,
+    block: dict[str, object],
+) -> None:
+    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    messages: Final = [{"role": "user", "content": [block]}]
+    try:
+        response: Final = rig.messages(key, "desktop", messages=messages)
+        assert response.status_code == 200, response.text
+        resource, count = rig.counts.get(timeout=5)
+        assert resource == response.headers["x-litellm-model-id"]
+        assert count["messages"] == messages
+        assert count["system"] == [{"type": "text", "text": "Answer briefly"}]
+        assert rig.payloads.get(timeout=5)["messages"] == messages
+        assert rig.counts.empty()
+    finally:
+        rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize("rig", ["anthropic"], indirect=True)
+@pytest.mark.parametrize("system,status", [("count-unavailable", 503), ("count-too-large", 429)])
+def test_messages_failed_attachment_count_never_generates_and_rolls_back_admission(
+    rig: Rig,
+    system: str,
+    status: int,
+) -> None:
+    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    try:
+        response: Final = rig.messages(
+            key,
+            "desktop",
+            system=system,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "url",
+                                "url": "https://example.invalid/image.png",
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+        assert response.status_code == status, response.text
+        assert rig.calls.empty()
+        assert rig.counts.get(timeout=5)[1]["system"] == system
+        recovered: Final = rig.messages(key, "desktop")
+        assert recovered.status_code == 200, recovered.text
+        assert rig.calls.get(timeout=5) == recovered.headers["x-litellm-model-id"]
+        assert rig.calls.empty()
+    finally:
+        rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize("rig", ["anthropic"], indirect=True)
+def test_messages_server_references_pin_the_account_and_block_cross_account_fallback(rig: Rig) -> None:
+    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    try:
+        unbound: Final = rig.messages(key, "desktop", container="container-one")
+        assert unbound.status_code == 409, unbound.text
+        assert rig.calls.empty()
+        assert rig.counts.empty()
+        created: Final = rig.messages(
+            key,
+            "desktop",
+            tools=[
+                {
+                    "type": "code_execution_20250825",
+                    "name": "code_execution",
+                }
+            ],
+        )
+        assert created.status_code == 200, created.text
+        resource: Final = created.headers["x-litellm-model-id"]
+        rig.fail_primary.set()
+        failed: Final = rig.messages(
+            key,
+            "desktop",
+            container="container-one",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "document", "source": {"type": "file", "file_id": "file-one"}}],
+                }
+            ],
+        )
+        assert failed.status_code == 503, failed.text
+        assert rig.calls.get(timeout=5) == resource
+        assert rig.calls.get(timeout=5) == resource
+        assert rig.payloads.get(timeout=5)["tools"] == [
+            {
+                "type": "code_execution_20250825",
+                "name": "code_execution",
+            }
+        ]
+        assert rig.payloads.get(timeout=5)["container"] == "container-one"
+        retry: Final = rig.messages(key, "desktop", container="container-one")
+        assert retry.status_code == 503, retry.text
+        assert rig.calls.empty()
+        assert rig.counts.get(timeout=5)[0] == resource
+        assert rig.counts.get(timeout=5)[0] == resource
+        assert rig.counts.empty()
+        assert rig.generation_betas.get(timeout=5) <= rig.count_betas.get(timeout=5)
+        assert rig.generation_betas.get(timeout=5) <= rig.count_betas.get(timeout=5)
+    finally:
+        rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize("rig", ["anthropic"], indirect=True)
+def test_messages_portable_attachment_failure_can_move_to_another_account(rig: Rig) -> None:
+    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    messages: Final = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "url",
+                        "url": "https://example.invalid/image.png",
+                    },
+                }
+            ],
+        }
+    ]
+    rig.fail_primary.set()
+    try:
+        failed: Final = rig.messages(key, "desktop", messages=messages)
+        assert failed.status_code == 503, failed.text
+        moved: Final = rig.messages(key, "desktop", messages=messages)
+        assert moved.status_code == 200, moved.text
+        assert rig.calls.get(timeout=5) == rig.config.primaries[0].id
+        assert rig.calls.get(timeout=5) == rig.config.primaries[1].id
+        assert rig.counts.get(timeout=5)[0] == rig.config.primaries[0].id
+        assert rig.counts.get(timeout=5)[0] == rig.config.primaries[1].id
+        assert rig.counts.empty()
+        assert rig.calls.empty()
     finally:
         rig.proxy.post("/key/delete", {"keys": [key]})

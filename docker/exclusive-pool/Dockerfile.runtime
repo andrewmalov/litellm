@@ -3,7 +3,7 @@ ARG BASE_IMAGE=litellm-pool-base:ea57c0345c
 FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 
-ARG LITELLM_RELEASE_TAG=exclusive-pool-messages-20261105
+ARG LITELLM_RELEASE_TAG=exclusive-pool-media-20261105
 ARG SOURCE_REVISION=development
 ENV LITELLM_RELEASE_TAG=${LITELLM_RELEASE_TAG}
 LABEL org.opencontainers.image.revision=${SOURCE_REVISION}

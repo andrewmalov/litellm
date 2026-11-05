@@ -144,6 +144,8 @@ class Failure(FrozenModel):
         "device_id_required",
         "unsupported_pool_request",
         "upstream_stream_incomplete",
+        "pool_reference_binding_required",
+        "pool_token_count_unavailable",
     ]
     status: int
     message: str
@@ -157,6 +159,7 @@ class Session(FrozenModel):
     resource: str | None
     last_activity: float
     established: bool = False
+    pinned_upstream: str | None = None
 
 
 class Operation(FrozenModel):
@@ -166,6 +169,8 @@ class Operation(FrozenModel):
     generation: str
     resource: str
     heartbeat: float
+    pending_pin: str | None = None
+    counted: bool = True
     started: bool = False
     quarantined: bool = False
     probe: bool = False
@@ -219,6 +224,9 @@ class Snapshot(FrozenModel):
 
 
 class Admission(FrozenModel):
+    needs_count: bool = False
+    pin_upstream: bool = False
+    requires_binding: bool = False
     client: str
     device: str
     operation: str

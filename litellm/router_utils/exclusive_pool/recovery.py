@@ -131,7 +131,8 @@ def fail(
                 _failed_health(h, active, policy, now, jitter) if h.resource in affected else h for h in ended.health
             ),
             "sessions": tuple(
-                s.model_copy(update={"resource": None}) if s.resource in affected else s for s in ended.sessions
+                s.model_copy(update={"resource": None}) if s.resource in affected and s.pinned_upstream is None else s
+                for s in ended.sessions
             ),
         }
     )

@@ -23,6 +23,7 @@ from litellm.proxy._types import UserAPIKeyAuth
 from litellm.types.utils import AllMessageValues, CallTypes, CallTypesLiteral, LLMResponseTypes
 
 from . import state
+from .context import count_input_tokens
 from .database import load_catalog
 from .discovery import CatalogRow
 from .models import Admission, Denied, Failure, Granted, Limits, Outcome, PoolConfig, Snapshot
@@ -53,6 +54,7 @@ class ExclusiveEndpointPool(CustomLogger):
         self,
         store: RedisPoolStore | None = None,
         catalog_source: Callable[[], Awaitable[tuple[CatalogRow, ...] | Failure]] = load_catalog,
+        input_counter: Callable[[RequestView, Mapping[str, object]], Awaitable[int | Failure]] = count_input_tokens,
     ) -> None:
         super().__init__()  # pyright: ignore[reportUnknownMemberType]  # CustomLogger exposes an untyped kwargs initializer
         self.store = store or RedisPoolStore(
@@ -60,6 +62,7 @@ class ExclusiveEndpointPool(CustomLogger):
             PoolConfig.model_validate_json(Path(os.environ["EXCLUSIVE_POOL_CONFIG"]).read_bytes()),
         )
         self.catalog_source = catalog_source
+        self.input_counter = input_counter
         self.secret = secrets.token_bytes(32)
         self._tasks: frozenset[asyncio.Task[None]] = frozenset()
         self._recovery: asyncio.Task[None] | None = None
@@ -95,7 +98,7 @@ class ExclusiveEndpointPool(CustomLogger):
                 Failure(
                     code="unsupported_pool_request",
                     status=400,
-                    message="This pool supports text chat completions and Anthropic Messages with portable context",
+                    message="This pool supports text chat completions and Anthropic Messages",
                 )
             )
         headers: Final[Mapping[str, str]] = request.proxy_server_request.headers if request.proxy_server_request else {}
@@ -116,13 +119,17 @@ class ExclusiveEndpointPool(CustomLogger):
             rpm=min(defaults.rpm, user_api_key_dict.rpm_limit or defaults.rpm),
             tpm=min(defaults.tpm, user_api_key_dict.tpm_limit or defaults.tpm),
         )
+        anthropic: Final = call_type in ("anthropic_messages", "aanthropic_messages")
         ticket: Final = Ticket(
             operation=uuid.uuid4().hex,
-            anthropic=call_type in ("anthropic_messages", "aanthropic_messages"),
+            anthropic=anthropic,
             client=safe_id(self.store.config.pool_id, user_api_key_dict.api_key),
             device=safe_id(self.store.config.pool_id, device.device_id),
             resource="",
-            tokens=request.reserved_tokens(output),
+            tokens=output if anthropic and request.needs_count else request.reserved_tokens(output),
+            needs_count=anthropic and request.needs_count,
+            pin_upstream=anthropic and request.pin_upstream,
+            requires_binding=anthropic and request.requires_binding,
             limits=limits,
         )
         metadata_key: Final = (
@@ -168,6 +175,9 @@ class ExclusiveEndpointPool(CustomLogger):
                 tokens=ticket.tokens,
                 limits=ticket.limits,
                 eligible=eligible,
+                needs_count=ticket.needs_count,
+                pin_upstream=ticket.pin_upstream,
+                requires_binding=ticket.requires_binding,
             )
         )
         match outcome:
@@ -177,11 +187,56 @@ class ExclusiveEndpointPool(CustomLogger):
                 raise_public(failure)
             case Granted(resource=resource):
                 self._begin_heartbeat(ticket.operation)
-                return [
-                    dict(deployment)
+                selected: Final = next(
+                    deployment
                     for deployment in healthy_deployments
                     if DeploymentView.model_validate(deployment).model_info.id == resource
-                ]
+                )
+                active: Final = next(op for op in outcome.state.operations if op.id == ticket.operation)
+                if not active.counted:
+                    await self._count_before_generation(ticket, model, messages, request_kwargs or {}, selected)
+                return [dict(selected)]
+
+    async def _count_before_generation(
+        self,
+        ticket: Ticket,
+        model: str,
+        messages: Sequence[AllMessageValues] | None,
+        kwargs: Mapping[str, object],
+        deployment: Mapping[str, object],
+    ) -> None:
+        try:
+            request: Final = RequestView.model_validate(
+                {**kwargs, "model": model, "messages": messages or kwargs.get("messages", ())}
+            )
+            count: Final = await self.input_counter(request, deployment)
+            if isinstance(count, Failure):
+                raise_public(count)
+            counted: Final = await self.store.transact(
+                lambda snapshot, now: state.reserve_counted_tokens(
+                    snapshot,
+                    self.store.config.resolve(snapshot),
+                    ticket.operation,
+                    request.counted_reservation(count, ticket.tokens),
+                    ticket.limits,
+                    now,
+                )
+            )
+            if isinstance(counted, Failure):
+                raise_public(counted)
+            if isinstance(counted, Denied):
+                raise_public(counted.failure)
+        except BaseException:
+            with anyio.CancelScope(shield=True):
+                await self.store.transact(
+                    lambda snapshot, now: state.abort(
+                        snapshot,
+                        self.store.config.resolve(snapshot),
+                        ticket.operation,
+                        now,
+                    )
+                )
+            raise
 
     async def async_pre_call_deployment_hook(
         self,
@@ -211,7 +266,7 @@ class ExclusiveEndpointPool(CustomLogger):
         self, snapshot: Snapshot, ticket: Ticket, deployment: str | None, now: float, call_type: CallTypes | None
     ) -> Outcome:
         operation: Final = next((op for op in snapshot.operations if op.id == ticket.operation), None)
-        if operation is None or operation.quarantined or operation.resource != deployment:
+        if operation is None or operation.quarantined or not operation.counted or operation.resource != deployment:
             return Denied(state=snapshot, failure=state.unavailable())
         if now - operation.heartbeat >= self.store.config.heartbeat_timeout:
             return Denied(state=snapshot, failure=state.unavailable())
@@ -219,9 +274,10 @@ class ExclusiveEndpointPool(CustomLogger):
             if ticket.is_adapter_call(call_type):
                 return Granted(state=snapshot, resource=operation.resource, operation=operation.id)
             return Denied(state=snapshot, failure=state.unavailable())
-        return Granted(
-            state=state.start(snapshot, ticket.operation, now), resource=operation.resource, operation=operation.id
-        )
+        started: Final = state.start(snapshot, ticket.operation, now)
+        if not any(op.id == operation.id and op.started for op in started.operations):
+            return Denied(state=snapshot, failure=state.unavailable())
+        return Granted(state=started, resource=operation.resource, operation=operation.id)
 
     async def async_post_call_success_deployment_hook(
         self,

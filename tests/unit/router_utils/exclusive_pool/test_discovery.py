@@ -425,3 +425,37 @@ def test_blocked_deployments_are_drained_and_cannot_receive_new_clients() -> Non
         3,
     )
     assert not isinstance(result, Granted)
+
+
+def test_pinned_server_context_switches_models_within_one_account_and_cannot_failover() -> None:
+    config: Final = _config()
+    snapshot: Final = _reconcile(empty_state(config), config, (*_upstream_rows("a"), *_upstream_rows("b")), 1)
+    first: Final = acquire(
+        snapshot,
+        config.resolve(snapshot),
+        Admission(
+            client="one",
+            device="device",
+            operation="server-tools",
+            tokens=10,
+            eligible=("a-opus", "b-opus"),
+            pin_upstream=True,
+        ),
+        now=2,
+    )
+    assert isinstance(first, Granted)
+    finished: Final = complete(start(first.state, "server-tools", 2), config.resolve(first.state), "server-tools", 3)
+    switched: Final = _admit(finished, "one", "sonnet", "switch", 4)
+    assert isinstance(switched, Granted)
+    assert switched.resource == "a-sonnet"
+    broken: Final = fail(
+        start(switched.state, "switch", 4),
+        config.resolve(switched.state),
+        "switch",
+        ErrorPolicy(kind="cooldown", confirmed_end=True, base_seconds=10),
+        5,
+        0,
+    )
+    denied: Final = _admit(broken, "one", "haiku", "retry", 6)
+    assert not isinstance(denied, Granted)
+    assert denied.failure.code == "endpoint_pool_exhausted"

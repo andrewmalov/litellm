@@ -113,6 +113,15 @@ def _choose(
 ) -> Resource | None:
     if session is not None and session.resource is None and _active(state, request.client):
         return None
+    if session is not None and session.pinned_upstream is not None:
+        return next(
+            (
+                r
+                for r in config.selectable
+                if r.upstream_id == session.pinned_upstream and _resource_available(state, config, r, request, now)
+            ),
+            None,
+        )
     previous: Final = next((r for r in config.resources if session is not None and r.id == session.resource), None)
     if previous is not None:
         siblings: Final = tuple(r for r in config.selectable if r.upstream_id == previous.upstream_id)
@@ -158,6 +167,15 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         if repeated.client != request.client or repeated.quarantined:
             return Denied(state=state, failure=unavailable())
         return Granted(state=current, resource=repeated.resource, operation=repeated.id)
+    if request.requires_binding and (session is None or session.resource is None):
+        return Denied(
+            state=state,
+            failure=Failure(
+                code="pool_reference_binding_required",
+                status=409,
+                message="Server references require a live assignment to their originating upstream",
+            ),
+        )
     logical: Final = request.logical or request.operation
     client_limits: Final = request.limits or config.client_limits
     if len(_active(current, request.client)) >= client_limits.parallel or not has_capacity(
@@ -181,6 +199,7 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         resource=resource.id,
         last_activity=session.last_activity if session else now,
         established=session.established if session else False,
+        pinned_upstream=session.pinned_upstream if session is not None else None,
     )
     operation: Final = Operation(
         id=request.operation,
@@ -190,6 +209,8 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         resource=resource.id,
         heartbeat=now,
         health_generation=next(h.generation for h in current.health if h.resource == resource.id),
+        counted=not request.needs_count,
+        pending_pin=resource.upstream_id if request.pin_upstream else None,
     )
     client_charge: Final = (
         ()
@@ -218,12 +239,71 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
     return Granted(state=updated, resource=resource.id, operation=operation.id)
 
 
+def reserve_counted_tokens(
+    state: Snapshot, config: PoolConfig, operation: str, tokens: int, limits: Limits | None, now: float
+) -> Outcome:
+    active: Final = next((op for op in state.operations if op.id == operation), None)
+    if active is None or active.quarantined or active.started or now - active.heartbeat >= config.heartbeat_timeout:
+        return Denied(state=state, failure=unavailable())
+    resource: Final = next(r for r in config.resources if r.id == active.resource)
+    charge_keys: Final = frozenset(
+        ((f"client:{active.client}", active.logical), (f"resource:{resource.scope}", active.id))
+    )
+    remaining: Final = state.model_copy(
+        update={
+            "charges": tuple(c for c in state.charges if (c.scope, c.operation) not in charge_keys),
+        }
+    )
+    if tokens <= 0:
+        return Denied(state=state, failure=unavailable())
+    if not has_capacity(
+        remaining, f"client:{active.client}", limits or config.client_limits, tokens, now, active.logical
+    ):
+        return Denied(
+            state=state,
+            failure=Failure(
+                code="client_rate_limit_exceeded",
+                status=429,
+                message="Client rate limit exceeded",
+                retry_after=60,
+            ),
+        )
+    if not has_capacity(remaining, f"resource:{resource.scope}", resource.limits, tokens, now, operation):
+        return Denied(state=state, failure=exhausted())
+    return Granted(
+        resource=active.resource,
+        operation=active.id,
+        state=state.model_copy(
+            update={
+                "charges": tuple(
+                    c.model_copy(update={"tokens": tokens}) if (c.scope, c.operation) in charge_keys else c
+                    for c in state.charges
+                ),
+                "operations": tuple(
+                    op.model_copy(update={"counted": True}) if op.id == operation else op for op in state.operations
+                ),
+            }
+        ),
+    )
+
+
 def start(state: Snapshot, operation: str, now: float) -> Snapshot:
     active: Final = next((op for op in state.operations if op.id == operation), None)
-    if active is None or active.quarantined:
+    if active is None or active.quarantined or not active.counted:
+        return state
+    if active.pending_pin is not None and not any(
+        s.client == active.client and s.generation == active.generation and s.resource is not None
+        for s in state.sessions
+    ):
         return state
     return state.model_copy(
         update={
+            "sessions": tuple(
+                s.model_copy(update={"pinned_upstream": s.pinned_upstream or active.pending_pin})
+                if s.client == active.client and s.generation == active.generation
+                else s
+                for s in state.sessions
+            ),
             "operations": tuple(
                 op.model_copy(update={"started": True, "heartbeat": now}) if op.id == operation else op
                 for op in state.operations

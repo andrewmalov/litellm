@@ -1,6 +1,6 @@
 # Exclusive endpoint pool deployment
 
-This stack targets linux/amd64 and runs two proxy workers, durable standalone Redis and PostgreSQL. It supports single-choice text Chat Completions and Anthropic Messages, including streaming and client tools. See [Anthropic Messages](anthropic-messages.md) for Claude Desktop configuration and content limits. Read the [pool runbook](../../docs/superpowers/exclusive-endpoint-pool.md) for routing guarantees and limitations
+This stack targets linux/amd64 and runs two proxy workers, durable standalone Redis and PostgreSQL. It supports single-choice text Chat Completions and Anthropic Messages, including streaming, client tools, images, documents and account-bound server context. See [Anthropic Messages](anthropic-messages.md) for Claude Desktop configuration and content limits. Read the [pool runbook](../../docs/superpowers/exclusive-endpoint-pool.md) for routing guarantees and limitations
 
 Run commands from this directory. Docker Compose v2 is required. Source builds need access to cgr.dev, packages.wolfi.dev, Docker Hub, GitHub and Python/npm registries. If Wolfi returns 403, check the US VPN before changing base images or dependencies
 
@@ -175,7 +175,7 @@ Supply that compatible base by digest and record the source revision:
 docker build --platform linux/amd64 -f Dockerfile.runtime \
   --build-arg BASE_IMAGE="$TRUSTED_BASE_IMAGE_DIGEST" \
   --build-arg SOURCE_REVISION="$(git -C ../.. rev-parse HEAD)" \
-  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-messages-20261105 ../..
+  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-media-20261105 ../..
 ```
 
 The base must use Python 3.13 and `/app/.venv`. Do not substitute an unrelated LiteLLM release. Publish the image and transfer this directory without `.env` to another host, transferring secrets separately. Set `LITELLM_IMAGE` to the published digest, then follow first-start or migration instructions. `--no-build` leaves build options unused

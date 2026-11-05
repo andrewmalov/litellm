@@ -21,6 +21,9 @@ class Ticket(FrozenModel):
     client: str
     device: str
     resource: str
+    needs_count: bool = False
+    pin_upstream: bool = False
+    requires_binding: bool = False
     anthropic: bool = False
     probe: bool = False
     tokens: int = 1
@@ -62,6 +65,7 @@ class RequestView(FrozenModel):
     response_format: Mapping[str, JsonValue] | None = None
     output_config: Mapping[str, JsonValue] | None = None
     output_format: Mapping[str, JsonValue] | None = None
+    thinking: JsonValue = None
     tool_choice: JsonValue = None
     function_call: JsonValue = None
     metadata: Mapping[str, object] = Field(default_factory=dict)
@@ -83,10 +87,36 @@ class RequestView(FrozenModel):
         if self.previous_response_id or not self.messages:
             return False
         if call_type in ("anthropic_messages", "aanthropic_messages"):
-            return self.container is None and all(
-                _portable_content(message.get("content")) for message in self.messages
+            return (self.container is None or isinstance(self.container, (str, dict))) and all(
+                _supported_content(message.get("content")) for message in self.messages
             )
         return call_type in ("completion", "acompletion") and self.text_only
+
+    @property
+    def requires_binding(self) -> bool:
+        from .context import has_reference
+
+        return (
+            isinstance(self.container, str)
+            or (isinstance(self.container, dict) and bool(self.container.get("id")))
+            or any(has_reference(message.get("content")) for message in self.messages)
+        )
+
+    @property
+    def pin_upstream(self) -> bool:
+        from .context import client_tool
+
+        return (
+            self.requires_binding
+            or self.container is not None
+            or any(not client_tool(tool.get("type")) for tool in self.tools)
+        )
+
+    @property
+    def needs_count(self) -> bool:
+        from .context import has_media
+
+        return self.pin_upstream or any(has_media(message.get("content")) for message in self.messages)
 
     def output_limit(self, server_limit: int) -> int:
         return min(self.max_completion_tokens or self.max_tokens or server_limit, server_limit)
@@ -108,26 +138,43 @@ class RequestView(FrozenModel):
         )
         return len(encoded.encode()) + output_limit + 32 * len(self.messages)
 
+    def counted_reservation(self, input_tokens: int, output_limit: int) -> int:
+        schemas: Final = tuple(
+            schema for schema in (self.output_format, self.response_format, self.functions) if schema
+        )
+        return (
+            input_tokens
+            + output_limit
+            + sum(len(json.dumps(schema, ensure_ascii=False).encode()) for schema in schemas)
+        )
+
     def ticket(self, secret: bytes) -> Ticket | None:
         return verified_ticket(self.metadata.get(TICKET_KEY, self.litellm_metadata.get(TICKET_KEY)), secret)
 
 
-def _portable_content(content: JsonValue) -> bool:
+def _supported_content(content: JsonValue) -> bool:
     if isinstance(content, str):
         return True
     if not isinstance(content, list) or not content:
         return False
-    return all(_portable_block(block) for block in content)
+    return all(_supported_block(block) for block in content)
 
 
-def _portable_block(block: JsonValue) -> bool:
+def _supported_block(block: JsonValue) -> bool:
     if not isinstance(block, dict):
         return False
     match block.get("type"):
         case "text" | "tool_use" | "thinking" | "redacted_thinking":
             return True
+        case "image" | "document":
+            source: Final = block.get("source")
+            return isinstance(source, dict) and source.get("type") in ("base64", "url", "text", "content", "file")
+        case "container_upload" | "server_tool_use":
+            return True
         case "tool_result":
-            return "content" not in block or block.get("content") == [] or _portable_content(block.get("content"))
+            return "content" not in block or block.get("content") == [] or _supported_content(block.get("content"))
+        case str() as kind if kind.endswith("_tool_result"):
+            return True
         case _:
             return False
 

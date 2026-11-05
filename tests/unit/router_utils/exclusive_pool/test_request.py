@@ -229,12 +229,13 @@ def test_chat_ticket_is_not_valid_for_nested_anthropic_adapter_calls() -> None:
         ],
     ],
 )
-def test_anthropic_nonportable_and_unreserved_media_are_rejected(content: list[dict[str, object]]) -> None:
+def test_anthropic_media_and_file_references_require_provider_token_count(content: list[dict[str, object]]) -> None:
     request: Final = RequestView.model_validate({"model": "alias", "messages": [{"role": "user", "content": content}]})
-    assert not request.supports("anthropic_messages")
+    assert request.supports("anthropic_messages")
+    assert request.needs_count
 
 
-def test_anthropic_container_reference_is_rejected() -> None:
+def test_anthropic_container_reference_requires_existing_account_binding() -> None:
     request: Final = RequestView.model_validate(
         {
             "model": "alias",
@@ -242,7 +243,9 @@ def test_anthropic_container_reference_is_rejected() -> None:
             "container": "container-1",
         }
     )
-    assert not request.supports("anthropic_messages")
+    assert request.supports("anthropic_messages")
+    assert request.requires_binding
+    assert request.pin_upstream
 
 
 def test_anthropic_empty_tool_result_content_is_portable() -> None:
@@ -275,3 +278,111 @@ def test_anthropic_error_event_cannot_be_followed_by_successful_completion() -> 
 
     failed: Final = StreamProgress().feed({"type": "error", "error": {"type": "overloaded_error"}})
     assert not failed.feed({"type": "message_stop"}).terminal
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="},
+        {"type": "url", "url": "https://example.invalid/image.png"},
+    ],
+)
+def test_inline_and_url_images_can_move_between_accounts(source: dict[str, str]) -> None:
+    request: Final = RequestView.model_validate(
+        {
+            "model": "alias",
+            "messages": [{"role": "user", "content": [{"type": "image", "source": source}]}],
+        }
+    )
+    assert request.supports("anthropic_messages")
+    assert request.needs_count
+    assert not request.requires_binding
+    assert not request.pin_upstream
+
+
+def test_server_tool_creation_pins_account_before_references_are_returned() -> None:
+    request: Final = RequestView.model_validate(
+        {
+            "model": "alias",
+            "messages": [{"role": "user", "content": "run code"}],
+            "tools": [{"type": "code_execution_20250825", "name": "code_execution"}],
+        }
+    )
+    assert request.supports("anthropic_messages")
+    assert request.pin_upstream
+    assert request.needs_count
+    assert not request.requires_binding
+
+
+def test_nested_tool_document_file_reference_requires_current_account() -> None:
+    request: Final = RequestView.model_validate(
+        {
+            "model": "alias",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": [
+                                {
+                                    "type": "document",
+                                    "source": {"type": "file", "file_id": "file-1"},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    assert request.supports("anthropic_messages")
+    assert request.requires_binding
+    assert request.pin_upstream
+
+
+def test_custom_tool_input_field_names_do_not_create_server_reference_semantics() -> None:
+    request: Final = RequestView.model_validate(
+        {
+            "model": "alias",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "local-tool",
+                            "name": "read_document",
+                            "input": {"file_id": "local-document", "type": "image"},
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    assert request.supports("anthropic_messages")
+    assert not request.requires_binding
+    assert not request.pin_upstream
+    assert not request.needs_count
+
+
+def test_attachment_reservation_keeps_legacy_output_schema_cost_even_when_provider_cannot_count_it() -> None:
+    plain: Final = RequestView(model="alias", messages=({"role": "user", "content": "hello"},))
+    schema: Final = plain.model_copy(update={"output_format": {"schema": {"description": "x" * 5000}}})
+    assert plain.counted_reservation(100, 16) == 116
+    assert schema.counted_reservation(100, 16) >= plain.counted_reservation(100, 16) + 5000
+
+
+@pytest.mark.parametrize("kind", ["computer", "bash", "text_editor", "memory"])
+def test_client_executed_builtin_tools_keep_portable_context_and_fallback(kind: str) -> None:
+    request: Final = RequestView.model_validate(
+        {
+            "model": "alias",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"type": f"{kind}_version", "name": kind}],
+        }
+    )
+    assert request.supports("anthropic_messages")
+    assert not request.pin_upstream
+    assert not request.needs_count
