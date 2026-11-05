@@ -3,7 +3,7 @@ import os
 import queue
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +15,7 @@ import pytest
 import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import JsonValue, TypeAdapter
 from redis import Redis
 
 from litellm.router_utils.exclusive_pool.models import Limits, PoolConfig, Resource, Snapshot
@@ -33,6 +34,7 @@ class Rig:
     stream_release: threading.Event
     fail_primary: threading.Event
     upstream: str
+    payloads: queue.SimpleQueue[Mapping[str, JsonValue]]
 
     def chat(self, key: str, device: str | None, **extra: object) -> httpx.Response:
         return self.proxy.request(
@@ -52,10 +54,27 @@ class Rig:
             key=key,
         )
 
+    def messages(self, key: str, device: str, **extra: object) -> httpx.Response:
+        return self.proxy.request(
+            "POST",
+            "/v1/messages?beta=true",
+            {
+                "model": self.config.models[0],
+                "max_tokens": 16,
+                "system": [{"type": "text", "text": "Answer briefly"}],
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+                "metadata": {"user_id": json.dumps({"device_id": device})},
+                **extra,
+            },
+            key=key,
+        )
+
 
 @pytest.fixture
 def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
-    dynamic: Final = request.param if hasattr(request, "param") else False
+    mode: Final = request.param if hasattr(request, "param") else False
+    dynamic: Final = mode is True
+    provider: Final = "anthropic" if mode == "anthropic" else "openai"
     marker: Final = uuid.uuid4().hex
     config: Final = PoolConfig(
         pool_id=f"pool-{marker}",
@@ -63,27 +82,44 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
         models=(f"exclusive-{marker}",),
         primaries=(Resource(id=f"a-{marker}", upstream_id="a"), Resource(id=f"b-{marker}", upstream_id="b")),
         fallback=Resource(id=f"f-{marker}", upstream_id="f", limits=Limits(parallel=2)),
-        client_limits=Limits(parallel=2),
+        client_limits=Limits(parallel=1),
         heartbeat_seconds=0.1,
         heartbeat_timeout=1,
     )
     pool_config: Final = tmp_path / "pool.json"
     pool_config.write_text(config.model_dump_json())
     calls: Final = queue.SimpleQueue[str]()
+    payloads: Final = queue.SimpleQueue[Mapping[str, JsonValue]]()
     upstream_models: Final = queue.SimpleQueue[str]()
     app: Final = FastAPI()
     stream_release: Final = threading.Event()
     fail_primary: Final = threading.Event()
 
+    @app.post("/{resource}/v1/messages", response_model=None)
     @app.post("/{resource}/v1/chat/completions", response_model=None)
     async def generate(resource: str, request: Request) -> dict[str, object] | StreamingResponse | JSONResponse:
         body: Final = await request.json()
         assert "exclusive_endpoint_pool" not in str(body)
+        payloads.put(TypeAdapter(dict[str, JsonValue]).validate_python(body))
         calls.put(resource)
         upstream_models.put(body["model"])
         if resource == config.primaries[0].id and fail_primary.is_set():
             fail_primary.clear()
             return JSONResponse(status_code=503, content={"error": {"message": "overloaded", "type": "server_error"}})
+        if request.url.path.endswith("/messages"):
+            native: Final = {
+                "id": f"msg-{uuid.uuid4().hex}",
+                "type": "message",
+                "role": "assistant",
+                "model": "exclusive-test-model",
+                "content": [{"type": "text", "text": resource}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 11, "output_tokens": 7},
+            }
+            if body.get("stream"):
+                return StreamingResponse(stream_messages(native, resource), media_type="text/event-stream")
+            return native
         if body.get("stream"):
             return StreamingResponse(stream(resource), media_type="text/event-stream")
         return {
@@ -127,6 +163,31 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
         )
         yield "data: [DONE]\n\n"
 
+    async def stream_messages(native: Mapping[str, object], resource: str):
+        events: Final = (
+            {
+                "type": "message_start",
+                "message": {
+                    **native,
+                    "content": [],
+                    "stop_reason": None,
+                    "usage": {"input_tokens": 11, "output_tokens": 0},
+                },
+            },
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": resource}},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": 7},
+            },
+        )
+        for event in events:
+            yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
+        await anyio.to_thread.run_sync(stream_release.wait)
+        yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
     redis: Final = Redis(host=os.environ["REDIS_HOST"], port=int(os.environ["REDIS_PORT"]))
     state_key: Final = f"litellm:exclusive-pool:{{{config.pool_id}}}:state"
     redis.set(state_key, empty_state(config).model_dump_json(), nx=True)
@@ -141,8 +202,8 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
                         {
                             "model_name": config.models[0],
                             "litellm_params": {
-                                "model": "openai/exclusive-test-model",
-                                "api_base": f"{upstream}/{resource.id}/v1",
+                                "model": f"{provider}/exclusive-test-model",
+                                "api_base": f"{upstream}/{resource.id}" + ("/v1" if provider == "openai" else ""),
                                 "api_key": "synthetic",
                                 "max_retries": 0,
                                 "timeout": 5,
@@ -153,7 +214,10 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
                         }
                         for resource in config.resources
                     ],
-                    "litellm_settings": {"callbacks": ["litellm.router_utils.exclusive_pool.configured.callback"]},
+                    "litellm_settings": {
+                        "callbacks": ["litellm.router_utils.exclusive_pool.configured.callback"],
+                        "use_chat_completions_url_for_anthropic_messages": True,
+                    },
                     "router_settings": {"num_retries": 0, "disable_cooldowns": True},
                     "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY", "store_model_in_db": dynamic},
                 }
@@ -179,8 +243,9 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
                                 {
                                     "model_name": config.models[0],
                                     "litellm_params": {
-                                        "model": "openai/exclusive-test-model",
-                                        "api_base": f"{upstream}/{resource.id}/v1",
+                                        "model": f"{provider}/exclusive-test-model",
+                                        "api_base": f"{upstream}/{resource.id}"
+                                        + ("/v1" if provider == "openai" else ""),
                                         "api_key": "synthetic",
                                         "max_retries": 0,
                                         "input_cost_per_token": 0,
@@ -196,7 +261,7 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
                                     },
                                 },
                             )
-                    yield Rig(proxy, config, calls, upstream_models, stream_release, fail_primary, upstream)
+                    yield Rig(proxy, config, calls, upstream_models, stream_release, fail_primary, upstream, payloads)
                 finally:
                     stream_release.set()
                     if dynamic:
@@ -244,14 +309,16 @@ def test_real_proxy_enforces_device_binding_and_sticky_primary_and_fallback(rig:
         rig.proxy.post("/key/delete", {"keys": list(keys)})
 
 
-def test_cancelled_client_stream_does_not_release_an_upstream_that_is_still_running(rig: Rig) -> None:
+@pytest.mark.parametrize("rig", [False, "anthropic"], indirect=True)
+@pytest.mark.parametrize("route", ["chat/completions", "messages?beta=true"])
+def test_cancelled_client_stream_does_not_release_an_upstream_that_is_still_running(rig: Rig, route: str) -> None:
     keys: Final = tuple(
         str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"]) for _ in range(2)
     )
     try:
         with rig.proxy.client.stream(
             "POST",
-            "/v1/chat/completions",
+            f"/v1/{route}",
             headers={"Authorization": f"Bearer {keys[0]}"},
             json={
                 "model": rig.config.models[0],
@@ -493,3 +560,109 @@ def test_multiple_models_share_physical_ownership_through_standard_model_api(rig
             for model in aliases:
                 rig.proxy.post("/model/delete", {"id": f"{resource.id}-{model}"})
         redis.close()
+
+
+@pytest.mark.parametrize("rig", [False, "anthropic"], indirect=True)
+def test_messages_share_assignments_device_binding_and_fallback_with_chat(rig: Rig) -> None:
+    keys: Final = tuple(
+        str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"]) for _ in range(3)
+    )
+
+    try:
+        first: Final = rig.messages(keys[0], "desktop")
+        assert first.status_code == 200, first.text
+        assert first.json()["type"] == "message"
+        assert first.json()["content"][0]["text"] == rig.config.primaries[0].id
+        chat: Final = rig.chat(keys[0], "desktop")
+        assert chat.status_code == 200, chat.text
+        assert chat.headers["x-litellm-model-id"] == first.headers["x-litellm-model-id"]
+        conflict: Final = rig.messages(keys[0], "another-desktop")
+        assert conflict.status_code == 409, conflict.text
+        rest: Final = tuple(rig.messages(key, "desktop") for key in keys[1:])
+        assert tuple(reply.status_code for reply in rest) == (200, 200), tuple(reply.text for reply in rest)
+        assert tuple(reply.headers["x-litellm-model-id"] for reply in rest) == (
+            rig.config.primaries[1].id,
+            rig.config.fallback.id,
+        )
+    finally:
+        rig.proxy.post("/key/delete", {"keys": list(keys)})
+
+
+@pytest.mark.parametrize("rig", [False, "anthropic"], indirect=True)
+def test_messages_stream_releases_inflight_slots_and_keeps_assignment(rig: Rig) -> None:
+    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    rig.stream_release.set()
+    try:
+        responses: Final = tuple(rig.messages(key, "desktop", stream=True) for _ in range(3))
+        for response in responses:
+            assert response.status_code == 200, response.text
+            assert "event: message_stop" in response.text, response.text
+            assert '"type": "error"' not in response.text, response.text
+            assert response.headers["x-litellm-model-id"] == rig.config.primaries[0].id
+    finally:
+        rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize("rig", [False, "anthropic"], indirect=True)
+def test_messages_client_rpm_limit_is_enforced_before_upstream(rig: Rig) -> None:
+    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models), "rpm_limit": 1})["key"])
+    try:
+        accepted: Final = rig.messages(key, "desktop")
+        assert accepted.status_code == 200, accepted.text
+        assert rig.calls.get(timeout=5) == rig.config.primaries[0].id
+        limited: Final = rig.messages(key, "desktop")
+        assert limited.status_code == 429, limited.text
+        assert rig.calls.empty()
+        assert float(limited.headers.get("retry-after", "0")) > 0
+    finally:
+        rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize("rig", [False, "anthropic"], indirect=True)
+def test_messages_confirmed_failure_moves_next_request_without_replaying(rig: Rig) -> None:
+    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    rig.fail_primary.set()
+    try:
+        failed: Final = rig.messages(key, "desktop")
+        assert failed.status_code == 503, failed.text
+        assert rig.calls.get(timeout=5) == rig.config.primaries[0].id
+        assert rig.calls.empty()
+        moved: Final = rig.messages(key, "desktop")
+        assert moved.status_code == 200, moved.text
+        assert moved.headers["x-litellm-model-id"] == rig.config.primaries[1].id
+    finally:
+        rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize("rig", [False, "anthropic"], indirect=True)
+def test_messages_tool_history_reaches_the_assigned_upstream(rig: Rig) -> None:
+    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    try:
+        response: Final = rig.messages(
+            key,
+            "desktop",
+            tools=[
+                {
+                    "name": "lookup",
+                    "description": "Look up a value",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            messages=[
+                {"role": "user", "content": "look up a value"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-1", "name": "lookup", "input": {}}]},
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "result-marker"}],
+                },
+            ],
+        )
+        assert response.status_code == 200, response.text
+        payload: Final = rig.payloads.get(timeout=5)
+        assert "result-marker" in json.dumps(payload["messages"])
+        assert "lookup" in json.dumps(payload["tools"])
+        assert "Answer briefly" in json.dumps(payload)
+        assert "exclusive_endpoint_pool" not in json.dumps(payload)
+        assert response.headers["x-litellm-model-id"] == rig.config.primaries[0].id
+    finally:
+        rig.proxy.post("/key/delete", {"keys": [key]})

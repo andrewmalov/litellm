@@ -1,14 +1,14 @@
 name: litellm-exclusive-pool
 
 x-image: &image
-  image: ${LITELLM_IMAGE:-cr.selcloud.ru/ttkdc/litellm:exclusive-pool-key-policies-20261105}
+  image: ${LITELLM_IMAGE:-cr.selcloud.ru/ttkdc/litellm:exclusive-pool-messages-20261105}
   platform: linux/amd64
   build:
     context: ../..
     dockerfile: Dockerfile
     target: runtime
     args:
-      LITELLM_RELEASE_TAG: exclusive-pool-key-policies-20261105
+      LITELLM_RELEASE_TAG: exclusive-pool-messages-20261105
 
 x-pool-environment: &pool-environment
   LITELLM_LOCAL_MODEL_COST_MAP: "True"

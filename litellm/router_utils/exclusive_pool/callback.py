@@ -20,7 +20,7 @@ from litellm.caching.caching import DualCache
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.device_identity import DeviceMissing, device_identity
 from litellm.proxy._types import UserAPIKeyAuth
-from litellm.types.utils import AllMessageValues, CallTypes, CallTypesLiteral, LLMResponseTypes, ModelResponseStream
+from litellm.types.utils import AllMessageValues, CallTypes, CallTypesLiteral, LLMResponseTypes
 
 from . import state
 from .database import load_catalog
@@ -90,12 +90,12 @@ class ExclusiveEndpointPool(CustomLogger):
             request: Final = RequestView.model_validate(data)
         except ValidationError:
             raise_public(Failure(code="unsupported_pool_request", status=400, message="Invalid endpoint pool request"))
-        if call_type not in ("completion", "acompletion") or not request.text_only or request.previous_response_id:
+        if not request.supports(call_type):
             raise_public(
                 Failure(
                     code="unsupported_pool_request",
                     status=400,
-                    message="This pool supports text chat completions with portable context",
+                    message="This pool supports text chat completions and Anthropic Messages with portable context",
                 )
             )
         headers: Final[Mapping[str, str]] = request.proxy_server_request.headers if request.proxy_server_request else {}
@@ -118,15 +118,20 @@ class ExclusiveEndpointPool(CustomLogger):
         )
         ticket: Final = Ticket(
             operation=uuid.uuid4().hex,
+            anthropic=call_type in ("anthropic_messages", "aanthropic_messages"),
             client=safe_id(self.store.config.pool_id, user_api_key_dict.api_key),
             device=safe_id(self.store.config.pool_id, device.device_id),
             resource="",
             tokens=request.reserved_tokens(output),
             limits=limits,
         )
+        metadata_key: Final = (
+            "litellm_metadata" if call_type in ("anthropic_messages", "aanthropic_messages") else "metadata"
+        )
+        metadata: Final = request.litellm_metadata if metadata_key == "litellm_metadata" else request.metadata
         return {
             **data,
-            "metadata": {**request.metadata, TICKET_KEY: ticket.sign(self.secret).model_dump()},
+            metadata_key: {**metadata, TICKET_KEY: ticket.sign(self.secret).model_dump()},
             "max_tokens": output if request.max_completion_tokens is None else None,
             "max_completion_tokens": output if request.max_completion_tokens is not None else None,
             "num_retries": 0,
@@ -195,18 +200,24 @@ class ExclusiveEndpointPool(CustomLogger):
                 raise_public(state.unavailable())
             return
         updated: Final = await self.store.transact(
-            lambda snapshot, now: self._start(snapshot, ticket, carriers.deployment, now)
+            lambda snapshot, now: self._start(snapshot, ticket, carriers.deployment, now, call_type)
         )
         if isinstance(updated, Failure):
             raise_public(updated)
         if isinstance(updated, Denied):
             raise_public(updated.failure)
 
-    def _start(self, snapshot: Snapshot, ticket: Ticket, deployment: str | None, now: float) -> Outcome:
+    def _start(
+        self, snapshot: Snapshot, ticket: Ticket, deployment: str | None, now: float, call_type: CallTypes | None
+    ) -> Outcome:
         operation: Final = next((op for op in snapshot.operations if op.id == ticket.operation), None)
-        if operation is None or operation.quarantined or operation.started or operation.resource != deployment:
+        if operation is None or operation.quarantined or operation.resource != deployment:
             return Denied(state=snapshot, failure=state.unavailable())
         if now - operation.heartbeat >= self.store.config.heartbeat_timeout:
+            return Denied(state=snapshot, failure=state.unavailable())
+        if operation.started:
+            if ticket.is_adapter_call(call_type):
+                return Granted(state=snapshot, resource=operation.resource, operation=operation.id)
             return Denied(state=snapshot, failure=state.unavailable())
         return Granted(
             state=state.start(snapshot, ticket.operation, now), resource=operation.resource, operation=operation.id
@@ -221,7 +232,7 @@ class ExclusiveEndpointPool(CustomLogger):
         if request_data.get("stream") is True:
             return
         ticket: Final = self._ticket(request_data)
-        if ticket is not None:
+        if ticket is not None and not ticket.is_adapter_call(call_type):
             await self._complete(ticket, actual_usage(response))
 
     async def async_post_call_failure_deployment_hook(
@@ -232,7 +243,7 @@ class ExclusiveEndpointPool(CustomLogger):
         fallback_depth: int | None = None,
     ) -> None:
         ticket: Final = self._ticket(request_data)
-        if ticket is None:
+        if ticket is None or ticket.is_adapter_call(call_type):
             return
         policy: Final = classify(exception)
         await self.store.transact(
@@ -269,12 +280,12 @@ class ExclusiveEndpointPool(CustomLogger):
                 )
             )
 
-    async def async_post_call_streaming_iterator_hook(
+    async def async_post_call_streaming_iterator_hook(  # pyright: ignore[reportIncompatibleMethodOverride]  # raw SSE
         self,
         user_api_key_dict: UserAPIKeyAuth,
-        response: AsyncIterator[ModelResponseStream],
+        response: AsyncIterator[object],
         request_data: Mapping[str, object],
-    ) -> AsyncGenerator[ModelResponseStream, None]:
+    ) -> AsyncGenerator[object, None]:
         ticket: Final = self._ticket(request_data)
         if ticket is None:
             async for chunk in response:

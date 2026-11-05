@@ -9,7 +9,7 @@ from typing import Annotated, Final, NoReturn
 from pydantic import Field, JsonValue, TypeAdapter, ValidationError
 
 from litellm.proxy._types import ProxyException
-from litellm.types.utils import ModelResponseStream
+from litellm.types.utils import CallTypes, ModelResponseStream
 
 from .models import Failure, FrozenModel, Limits
 
@@ -21,9 +21,13 @@ class Ticket(FrozenModel):
     client: str
     device: str
     resource: str
+    anthropic: bool = False
     probe: bool = False
     tokens: int = 1
     limits: Limits | None = None
+
+    def is_adapter_call(self, call_type: CallTypes | None) -> bool:
+        return self.anthropic and call_type in (CallTypes.acompletion, CallTypes.aresponses)
 
     def sign(self, secret: bytes) -> SignedTicket:
         return SignedTicket(
@@ -50,10 +54,14 @@ class ProxyRequest(FrozenModel):
 
 class RequestView(FrozenModel):
     model: str
+    system: JsonValue = None
+    container: JsonValue = None
     messages: tuple[Mapping[str, JsonValue], ...] = ()
     tools: tuple[Mapping[str, JsonValue], ...] = ()
     functions: tuple[Mapping[str, JsonValue], ...] = ()
     response_format: Mapping[str, JsonValue] | None = None
+    output_config: Mapping[str, JsonValue] | None = None
+    output_format: Mapping[str, JsonValue] | None = None
     tool_choice: JsonValue = None
     function_call: JsonValue = None
     metadata: Mapping[str, object] = Field(default_factory=dict)
@@ -71,6 +79,15 @@ class RequestView(FrozenModel):
             isinstance(m.get("content"), str) or m.get("content") is None for m in self.messages
         )
 
+    def supports(self, call_type: str) -> bool:
+        if self.previous_response_id or not self.messages:
+            return False
+        if call_type in ("anthropic_messages", "aanthropic_messages"):
+            return self.container is None and all(
+                _portable_content(message.get("content")) for message in self.messages
+            )
+        return call_type in ("completion", "acompletion") and self.text_only
+
     def output_limit(self, server_limit: int) -> int:
         return min(self.max_completion_tokens or self.max_tokens or server_limit, server_limit)
 
@@ -78,9 +95,12 @@ class RequestView(FrozenModel):
         encoded: Final = json.dumps(
             {
                 "messages": self.messages,
+                "system": self.system,
                 "tools": self.tools,
                 "functions": self.functions,
                 "response_format": self.response_format,
+                "output_config": self.output_config,
+                "output_format": self.output_format,
                 "tool_choice": self.tool_choice,
                 "function_call": self.function_call,
             },
@@ -90,6 +110,26 @@ class RequestView(FrozenModel):
 
     def ticket(self, secret: bytes) -> Ticket | None:
         return verified_ticket(self.metadata.get(TICKET_KEY, self.litellm_metadata.get(TICKET_KEY)), secret)
+
+
+def _portable_content(content: JsonValue) -> bool:
+    if isinstance(content, str):
+        return True
+    if not isinstance(content, list) or not content:
+        return False
+    return all(_portable_block(block) for block in content)
+
+
+def _portable_block(block: JsonValue) -> bool:
+    if not isinstance(block, dict):
+        return False
+    match block.get("type"):
+        case "text" | "tool_use" | "thinking" | "redacted_thinking":
+            return True
+        case "tool_result":
+            return "content" not in block or block.get("content") == [] or _portable_content(block.get("content"))
+        case _:
+            return False
 
 
 def recovery_request(model: str) -> RequestView:
@@ -164,15 +204,29 @@ def marked_model(model: object, deployments: object) -> bool:
 
 
 class UsageView(FrozenModel):
-    total_tokens: int
+    total_tokens: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+
+    @property
+    def total(self) -> int | None:
+        if self.total_tokens is not None:
+            return self.total_tokens
+        if self.input_tokens is None or self.output_tokens is None:
+            return None
+        return self.input_tokens + self.output_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
+
+
+class _UsageCarrier(FrozenModel):
+    usage: object = None
 
 
 def actual_usage(response: object) -> int | None:
-    usage: Final = getattr(response, "usage", None)
-    if usage is None:
-        return None
     try:
-        return UsageView.model_validate(usage, from_attributes=True).total_tokens
+        carrier: Final = _UsageCarrier.model_validate(response, from_attributes=True)
+        return UsageView.model_validate(carrier.usage, from_attributes=True).total
     except ValidationError:
         return None
 
@@ -205,11 +259,63 @@ def has_upstream_override(data: Mapping[str, object]) -> bool:
 
 class StreamProgress(FrozenModel):
     terminal: bool = False
+    failed: bool = False
     tokens: int | None = None
 
-    def feed(self, chunk: ModelResponseStream) -> StreamProgress:
-        usage: Final = actual_usage(chunk)
-        return StreamProgress(
-            terminal=self.terminal or any(choice.finish_reason is not None for choice in chunk.choices),
-            tokens=usage if usage is not None else self.tokens,
+    usage: UsageView | None = None
+    pending: bytes = Field(default=b"", repr=False)
+
+    def feed(self, chunk: object) -> StreamProgress:
+        if isinstance(chunk, ModelResponseStream):
+            usage: Final = actual_usage(chunk)
+            return self.model_copy(
+                update={
+                    "terminal": self.terminal or any(choice.finish_reason is not None for choice in chunk.choices),
+                    "tokens": usage if usage is not None else self.tokens,
+                }
+            )
+        if isinstance(chunk, (str, bytes)):
+            raw: Final = self.pending + (chunk.encode() if isinstance(chunk, str) else chunk)
+            complete, separator, pending = raw.rpartition(b"\n")
+            return self.model_copy(update={"pending": pending})._events(complete + separator)
+        return self._events(chunk)
+
+    def _events(self, chunk: object) -> StreamProgress:
+        from litellm.llms.anthropic.chat.guardrail_translation.handler import AnthropicMessagesHandler
+
+        progress: StreamProgress = self  # rebind-ok: fold parsed events without retaining generated content
+        events: Final = AnthropicMessagesHandler._iter_sse_events(  # pyright: ignore[reportPrivateUsage]  # shared SSE
+            chunk
         )
+        for payload in events:
+            progress = progress._event(payload)
+        return progress
+
+    def _event(self, payload: Mapping[str, object]) -> StreamProgress:
+        event: Final = _AnthropicEvent.model_validate(payload)
+        current: Final = event.message.usage if event.message is not None else event.usage
+        merged: Final = UsageView.model_validate(
+            {
+                **(self.usage.model_dump() if self.usage is not None else {}),
+                **(current.model_dump(exclude_unset=True) if current is not None else {}),
+            }
+        )
+        failed: Final = self.failed or event.type == "error"
+        return self.model_copy(
+            update={
+                "failed": failed,
+                "terminal": (self.terminal or event.type == "message_stop") and not failed,
+                "usage": merged,
+                "tokens": merged.total,
+            }
+        )
+
+
+class _AnthropicMessage(FrozenModel):
+    usage: UsageView | None = None
+
+
+class _AnthropicEvent(FrozenModel):
+    type: str
+    message: _AnthropicMessage | None = None
+    usage: UsageView | None = None

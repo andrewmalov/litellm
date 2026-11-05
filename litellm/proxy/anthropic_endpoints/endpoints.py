@@ -248,14 +248,17 @@ async def anthropic_response(
         )
         return JSONResponse(status_code=e.status_code, content=body)
     except Exception as e:
-        await proxy_logging_obj.post_call_failure_hook(
+        transformed_exception: Final = await proxy_logging_obj.post_call_failure_hook(
             user_api_key_dict=user_api_key_dict, original_exception=e, request_data=base_llm_response_processor.data
         )
-        log_llm_api_exception(e, base_llm_response_processor.litellm_call_id)
+        error: Final = (
+            transformed_exception if isinstance(transformed_exception, (HTTPException, ProxyException)) else e
+        )
+        log_llm_api_exception(error, base_llm_response_processor.litellm_call_id)
 
-        if isinstance(e, ProxyException):
+        if isinstance(error, ProxyException):
             return _anthropic_error_json_response(
-                with_litellm_call_id(e, base_llm_response_processor.litellm_call_id), request
+                with_litellm_call_id(error, base_llm_response_processor.litellm_call_id), request
             )
 
         # Extract model_id from request metadata (same as success path)
@@ -272,20 +275,20 @@ async def anthropic_response(
             response_cost=0,
             model_region=getattr(user_api_key_dict, "allowed_model_region", ""),
             request_data=data,
-            timeout=getattr(e, "timeout", None),
+            timeout=getattr(error, "timeout", None),
             litellm_logging_obj=None,
         )
 
-        if isinstance(e, HTTPException):
-            return _anthropic_error_json_response(proxy_exception_from_http_exception(e, headers), request)
+        if isinstance(error, HTTPException):
+            return _anthropic_error_json_response(proxy_exception_from_http_exception(error, headers), request)
 
-        error_msg: Final = f"{e}"
+        error_msg: Final = f"{error}"
         return _anthropic_error_json_response(
             ProxyException(
-                message=getattr(e, "message", error_msg),
-                type=openai_error_type(e, error_status_code(e, 500)),
-                param=openai_error_param(e),
-                code=error_status_code(e, 500),
+                message=getattr(error, "message", error_msg),
+                type=openai_error_type(error, error_status_code(error, 500)),
+                param=openai_error_param(error),
+                code=error_status_code(error, 500),
                 headers=headers,
             ),
             request,
