@@ -110,7 +110,7 @@ Model registrations on the same physical upstream must have the same role, effec
 
 To upgrade an existing discovery deployment, stop incoming traffic, drain operations and replace all proxy workers before adding model aliases. Preserve Redis and PostgreSQL volumes and the existing `pool.json`; initialization and reconfiguration are unnecessary for this code upgrade. Do not mix old and new workers with multi-model registrations. For an existing registration, reuse its current `exclusive_upstream_id`, which defaults to its deployment ID, for the new sibling models
 
-Create client virtual keys through `/key/generate`. Claude Desktop requests the registered public model name at `/v1/messages?beta=true`, authenticating with their virtual key and supplying `metadata.user_id` as a JSON string containing `device_id`. See the [multi-client runner](../../tests/e2e/router/exclusive_endpoint_pool.md) for provider acceptance. Scripted upstream tests do not qualify real providers or installed Claude clients
+Create client virtual keys through `/key/generate`. Claude Desktop requests the registered public model name at `/v1/messages?beta=true`, authenticating with their virtual key. Device metadata is optional; changed or missing `device_id` values preserve the key assignment and shared limits. See the [multi-client runner](../../tests/e2e/router/exclusive_endpoint_pool.md) for provider acceptance. Scripted upstream tests do not qualify real providers or installed Claude clients
 
 The catalog refreshes every `heartbeat_seconds`, 10 seconds by default. Worker-local Router refreshes can add further delay before every worker can use a new deployment. Admission requires a deployment to exist in both the shared catalog and the worker's eligible list. Adding capacity preserves existing client assignments. Unmarked deployments sharing the model name cannot be selected by the pool
 
@@ -175,7 +175,7 @@ Supply that compatible base by digest and record the source revision:
 docker build --platform linux/amd64 -f Dockerfile.runtime \
   --build-arg BASE_IMAGE="$TRUSTED_BASE_IMAGE_DIGEST" \
   --build-arg SOURCE_REVISION="$(git -C ../.. rev-parse HEAD)" \
-  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-count-headers-20261106 ../..
+  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-key-identity-20261106 ../..
 ```
 
 The base must use Python 3.13 and `/app/.venv`. Do not substitute an unrelated LiteLLM release. Publish the image and transfer this directory without `.env` to another host, transferring secrets separately. Set `LITELLM_IMAGE` to the published digest, then follow first-start or migration instructions. `--no-build` leaves build options unused
