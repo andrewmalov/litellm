@@ -3,7 +3,7 @@ ARG BASE_IMAGE=litellm-pool-base:ea57c0345c
 FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 
-ARG LITELLM_RELEASE_TAG=exclusive-pool-media-20261105
+ARG LITELLM_RELEASE_TAG=exclusive-pool-count-headers-20261106
 ARG SOURCE_REVISION=development
 ENV LITELLM_RELEASE_TAG=${LITELLM_RELEASE_TAG}
 LABEL org.opencontainers.image.revision=${SOURCE_REVISION}
@@ -16,3 +16,5 @@ COPY litellm/proxy/auth/user_api_key_auth.py /app/.venv/lib/python3.13/site-pack
 COPY litellm/proxy/management_endpoints/key_management_endpoints.py litellm/proxy/management_endpoints/organization_endpoints.py litellm/proxy/management_endpoints/team_endpoints.py /app/.venv/lib/python3.13/site-packages/litellm/proxy/management_endpoints/
 COPY litellm/proxy/management_helpers/key_budget_policy.py /app/.venv/lib/python3.13/site-packages/litellm/proxy/management_helpers/
 COPY litellm/proxy/anthropic_endpoints/endpoints.py /app/.venv/lib/python3.13/site-packages/litellm/proxy/anthropic_endpoints/
+
+COPY litellm/llms/anthropic/count_tokens/transformation.py /app/.venv/lib/python3.13/site-packages/litellm/llms/anthropic/count_tokens/

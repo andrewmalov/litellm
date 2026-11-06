@@ -24,7 +24,7 @@ The deployment template uses native Messages directly. Remove `litellm_settings.
 
 Streaming responses retain Anthropic SSE events. The pool waits for `message_stop` before releasing an operation. Interrupted streams retain the existing quarantine behavior. Input reservation includes the system prompt, conversation and tool definitions; usage settlement includes cached input tokens. For portable context, a confirmed upstream failure moves the next request under the existing pool rules and never silently replays a partially generated request
 
-Use image `cr.selcloud.ru/ttkdc/litellm:exclusive-pool-media-20261105` or its published digest. Update the model registrations and mounted proxy YAML as described above when deploying over an existing installation; changing the image alone does not replace mounted configuration. Replace all workers sharing pool Redis state together, since older workers do not preserve the new reservation and affinity fields
+Use image `cr.selcloud.ru/ttkdc/litellm:exclusive-pool-count-headers-20261106` or its published digest. Update the model registrations and mounted proxy YAML as described above when deploying over an existing installation; changing the image alone does not replace mounted configuration. Replace all workers sharing pool Redis state together, since older workers do not preserve the new reservation and affinity fields
 
 To check generation, set `PROXY_URL`, `LITELLM_API_KEY` and `MODEL_NAME` to your deployment values and run:
 

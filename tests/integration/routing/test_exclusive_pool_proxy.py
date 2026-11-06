@@ -108,6 +108,8 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
         assert request.headers.get("x-api-key") == "synthetic"
         counts.put((resource, body))
         count_betas.put(frozenset(request.headers.get("anthropic-beta", "").split(",")))
+        if resource == config.fallback.id and request.headers.getlist("content-type") != ["application/json"]:
+            return JSONResponse(status_code=415, content={"error": {"message": "expected one JSON content type"}})
         if body.get("system") == "count-unavailable":
             return JSONResponse(status_code=501, content={"error": {"message": "not implemented"}})
         return JSONResponse(content={"input_tokens": 61000 if body.get("system") == "count-too-large" else 100})
@@ -852,3 +854,40 @@ def test_messages_portable_attachment_failure_can_move_to_another_account(rig: R
         assert rig.calls.empty()
     finally:
         rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize("rig", ["anthropic"], indirect=True)
+def test_messages_attachment_reaches_strict_fallback_without_duplicate_content_type(rig: Rig) -> None:
+    keys: Final = tuple(
+        str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"]) for _ in range(3)
+    )
+    try:
+        for key in keys[:2]:
+            text: Final = rig.messages(key, "desktop")
+            assert text.status_code == 200, text.text
+        response: Final = rig.messages(
+            keys[2],
+            "desktop",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "url",
+                                "url": "https://example.invalid/image.png",
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers["x-litellm-model-id"] == rig.config.fallback.id
+        assert rig.counts.get(timeout=5)[0] == rig.config.fallback.id
+        assert rig.counts.empty()
+        assert tuple(rig.calls.get(timeout=5) for _ in range(3)) == tuple(r.id for r in rig.config.resources)
+        assert rig.calls.empty()
+    finally:
+        rig.proxy.post("/key/delete", {"keys": list(keys)})

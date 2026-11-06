@@ -142,12 +142,13 @@ class AnthropicCountTokensConfig:
         (``AnthropicModelInfo.get_auth_header``): x-api-key for a static key, an Authorization
         bearer for ``ANTHROPIC_AUTH_TOKEN`` and for sk-ant-oat tokens, whose mandatory oauth beta
         merges with the token-counting beta instead of replacing it."""
+        normalized: Final = {name.lower(): value for name, value in auth_header.items()}
         return {
             "Content-Type": "application/json",
             "anthropic-version": "2023-06-01",
-            **auth_header,
+            **{name: value for name, value in normalized.items() if name != "content-type"},
             "anthropic-beta": merge_anthropic_beta_headers(
-                auth_header.get("anthropic-beta"), ANTHROPIC_TOKEN_COUNTING_BETA_VERSION
+                normalized.get("anthropic-beta"), ANTHROPIC_TOKEN_COUNTING_BETA_VERSION
             ),
         }
 

@@ -441,3 +441,40 @@ async def test_handler_sends_the_leading_system_run_as_system_not_as_a_message(h
         "system": [{"type": "text", "text": "Be terse"}],
         "messages": [{"role": "user", "content": "Hello, how are you?"}],
     }
+
+
+@pytest.mark.parametrize(
+    "content_headers",
+    [
+        {"Content-Type": "application/json"},
+        {"content-type": "application/json"},
+        {"CONTENT-TYPE": "application/json"},
+        {"Content-Type": "application/json", "content-type": "application/json"},
+    ],
+)
+def test_count_headers_are_singleton_on_the_wire_and_preserve_native_auth_and_betas(
+    content_headers: dict[str, str],
+) -> None:
+    from litellm.constants import ANTHROPIC_TOKEN_COUNTING_BETA_VERSION
+
+    auth: Final = {
+        **content_headers,
+        "Authorization": "Bearer test-credential",
+        "ANTHROPIC-VERSION": "test-version",
+        "Anthropic-Beta": "test-feature-beta",
+    }
+    request: Final = httpx.Request(
+        "POST",
+        "https://provider.invalid/v1/messages/count_tokens",
+        headers=AnthropicCountTokensConfig().get_count_tokens_headers(auth),
+    )
+    assert request.headers.get_list("content-type") == ["application/json"]
+    assert request.headers.get_list("authorization") == [auth["Authorization"]]
+    assert request.headers.get_list("anthropic-version") == [auth["ANTHROPIC-VERSION"]]
+    assert len(request.headers.get_list("anthropic-beta")) == 1
+    assert frozenset(request.headers["anthropic-beta"].split(",")) == frozenset(
+        (
+            auth["Anthropic-Beta"],
+            ANTHROPIC_TOKEN_COUNTING_BETA_VERSION,
+        )
+    )
