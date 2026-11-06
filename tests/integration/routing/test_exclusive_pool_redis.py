@@ -107,7 +107,9 @@ async def test_independent_coordinators_cannot_give_a_primary_to_two_keys(store:
 
 
 @pytest.mark.asyncio
-async def test_first_device_race_has_one_winner_and_lost_state_never_bootstraps_itself(store: RedisPoolStore) -> None:
+async def test_first_device_race_shares_key_assignment_and_lost_state_never_bootstraps_itself(
+    store: RedisPoolStore,
+) -> None:
     replies: Final = await asyncio.gather(
         *(
             store.acquire(
@@ -116,10 +118,7 @@ async def test_first_device_race_has_one_winner_and_lost_state_never_bootstraps_
             for device in ("left", "right")
         )
     )
-    assert sum(isinstance(reply, Granted) for reply in replies) == 1
-    assert (
-        sum(isinstance(reply, Denied) and reply.failure.code == "key_bound_to_another_device" for reply in replies) == 1
-    )
+    assert all(isinstance(reply, Granted) and reply.resource == "a" for reply in replies)
     await store.redis.delete(store.key)
     lost: Final = await store.acquire(
         Admission(client="new", device="d", operation="new", tokens=10, eligible=("a", "b", "f"))

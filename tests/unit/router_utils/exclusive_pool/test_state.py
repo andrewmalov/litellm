@@ -1,7 +1,7 @@
 from typing import Final
 
 from litellm.router_utils.exclusive_pool.models import Admission, Limits, PoolConfig, Resource
-from litellm.router_utils.exclusive_pool.state import acquire, complete, empty_state, start
+from litellm.router_utils.exclusive_pool.state import acquire, complete, empty_state, heartbeat, start
 
 
 def config() -> PoolConfig:
@@ -29,37 +29,38 @@ def test_distinct_keys_receive_ordered_exclusive_primaries_then_shared_fallback(
     assert acquire(fourth.state, cfg, request("five"), now=0).failure.code == "endpoint_pool_exhausted"
 
 
-def test_conflicts_and_limits_do_not_refresh_a_binding() -> None:
+def test_changed_device_reuses_key_assignment_without_refreshing_until_completion() -> None:
     cfg: Final = config()
     bound: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)
     finished: Final = complete(start(bound.state, "one", now=0), cfg, "one", now=10, actual_tokens=5)
-    conflict: Final = acquire(finished, cfg, request("one", "other", "conflict"), now=900)
-    assert conflict.failure.code == "key_bound_to_another_device"
-    assert conflict.failure.retry_after == 10
-    assert conflict.state.sessions == finished.sessions
-    assert conflict.state.charges == finished.charges
-    rebound: Final = acquire(conflict.state, cfg, request("one", "other", "new"), now=910)
-    assert rebound.resource == "b"
+    changed: Final = acquire(finished, cfg, request("one", "other", "changed"), now=900)
+    assert changed.resource == bound.resource
+    assert changed.state.sessions[0].generation == bound.state.sessions[0].generation
+    assert changed.state.sessions[0].last_activity == finished.sessions[0].last_activity
+    ended: Final = complete(start(changed.state, "changed", now=900), cfg, "changed", now=901)
+    assert ended.sessions[0].last_activity == 901
+    assert acquire(ended, cfg, request("one", "third", "new"), now=1801).resource == "b"
 
 
 def test_live_request_holds_binding_beyond_idle_and_late_completion_is_idempotent() -> None:
     cfg: Final = config()
     allocated: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)
     active: Final = start(allocated.state, "one", now=0)
-    conflict: Final = acquire(active, cfg, request("one", "other", "conflict"), now=1000)
-    assert conflict.failure.code == "key_bound_to_another_device"
+    parallel: Final = acquire(heartbeat(active, "one", now=999), cfg, request("one", "other", "parallel"), now=1000)
+    assert parallel.resource == allocated.resource
+    assert parallel.state.sessions[0].generation == allocated.state.sessions[0].generation
     ended: Final = complete(active, cfg, "one", now=1100, actual_tokens=5)
     assert complete(ended, cfg, "one", now=1500, actual_tokens=5) == ended
-    assert acquire(ended, cfg, request("one", "other", "new"), now=1999).failure.code == "key_bound_to_another_device"
+    assert acquire(ended, cfg, request("one", "other", "new"), now=1999).resource == allocated.resource
     assert acquire(ended, cfg, request("one", "other", "new"), now=2000).resource == "b"
 
 
-def test_same_device_parallelism_is_shared_across_primary_and_fallback() -> None:
+def test_key_parallelism_is_shared_across_devices() -> None:
     cfg: Final = config()
     first: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)
-    second: Final = acquire(first.state, cfg, request("one", operation="parallel"), now=1)
+    second: Final = acquire(first.state, cfg, request("one", "other", operation="parallel"), now=1)
     assert second.resource == first.resource
-    limited: Final = acquire(second.state, cfg, request("one", operation="third"), now=2)
+    limited: Final = acquire(second.state, cfg, request("one", "third", operation="third"), now=2)
     assert limited.failure.code == "client_rate_limit_exceeded"
     assert limited.state.sessions == second.state.sessions
     assert limited.state.charges == second.state.charges
@@ -120,13 +121,14 @@ def test_inflight_limit_and_client_rpm_cover_aliases_and_retries_share_one_rpm_c
     )
 
 
-def test_device_conflicts_are_observable_without_refreshing_the_lease() -> None:
-    cfg: Final = config()
-    bound: Final = acquire(empty_state(cfg), cfg, request("key-digest"), now=0)
-    rejected: Final = acquire(bound.state, cfg, request("key-digest", "other-device-digest", "denied"), now=100)
-    assert rejected.state.sessions == bound.state.sessions
-    assert rejected.state.events[-1].kind == "device_conflict"
-    assert rejected.state.events[-1].client == "key-digest"
+def test_device_changes_cannot_bypass_key_rpm_limit() -> None:
+    cfg: Final = config().model_copy(update={"client_limits": Limits(parallel=2, rpm=1, tpm=10000)})
+    bound: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)
+    ended: Final = complete(start(bound.state, "one", now=0), cfg, "one", now=1)
+    limited: Final = acquire(ended, cfg, request("one", "other", "new"), now=2)
+    assert limited.failure.code == "client_rate_limit_exceeded"
+    assert limited.state.sessions == ended.sessions
+    assert limited.state.charges == ended.charges
 
 
 def test_dead_unsent_reservations_are_reclaimed_but_started_work_is_quarantined() -> None:

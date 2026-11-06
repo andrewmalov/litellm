@@ -138,10 +138,8 @@ def _same_upstream_policy(resource: Resource, resources: tuple[Resource, ...]) -
 class Failure(FrozenModel):
     code: Literal[
         "endpoint_pool_exhausted",
-        "key_bound_to_another_device",
         "client_rate_limit_exceeded",
         "routing_state_unavailable",
-        "device_id_required",
         "unsupported_pool_request",
         "upstream_stream_incomplete",
         "pool_reference_binding_required",

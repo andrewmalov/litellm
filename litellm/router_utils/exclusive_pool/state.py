@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from functools import reduce
 from typing import Final
 
@@ -150,18 +149,6 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         return Denied(state=state, failure=unavailable())
     current: Final = _prune(state, now)
     session: Final = next((s for s in current.sessions if s.client == request.client), None)
-    if session is not None and session.device != request.device:
-        return Denied(
-            state=record_event(
-                state, config, Event(time=now, kind="device_conflict", client=request.client, device=request.device)
-            ),
-            failure=Failure(
-                code="key_bound_to_another_device",
-                status=409,
-                message="API key is bound to another device",
-                retry_after=max(1, math.ceil(session.last_activity + IDLE_SECONDS - now)),
-            ),
-        )
     repeated: Final = next((op for op in current.operations if op.id == request.operation), None)
     if repeated is not None:
         if repeated.client != request.client or repeated.quarantined:

@@ -108,8 +108,6 @@ class ExclusiveEndpointPool(CustomLogger):
             if self.store.config.device_header
             else None,
         )
-        if isinstance(device, DeviceMissing):
-            raise_public(Failure(code="device_id_required", status=400, message="A stable device_id is required"))
         if not user_api_key_dict.api_key:
             raise_public(state.unavailable())
         output: Final = request.output_limit(self.store.config.output_tokens)
@@ -124,7 +122,7 @@ class ExclusiveEndpointPool(CustomLogger):
             operation=uuid.uuid4().hex,
             anthropic=anthropic,
             client=safe_id(self.store.config.pool_id, user_api_key_dict.api_key),
-            device=safe_id(self.store.config.pool_id, device.device_id),
+            device="" if isinstance(device, DeviceMissing) else safe_id(self.store.config.pool_id, device.device_id),
             resource="",
             tokens=output if anthropic and request.needs_count else request.reserved_tokens(output),
             needs_count=anthropic and request.needs_count,

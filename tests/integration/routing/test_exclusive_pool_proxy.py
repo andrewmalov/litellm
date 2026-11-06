@@ -304,26 +304,22 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
 
 
 @pytest.mark.parametrize("rig", [False, True], indirect=True)
-def test_real_proxy_enforces_device_binding_and_sticky_primary_and_fallback(rig: Rig) -> None:
+def test_real_proxy_keeps_key_assignments_across_device_changes_and_missing_identity(rig: Rig) -> None:
     keys: Final = tuple(
         str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"]) for _ in range(4)
     )
     try:
-        invalid: Final = rig.chat(keys[0], None)
-        assert invalid.status_code == 400, invalid.text
-        assert invalid.json()["error"]["code"] == "device_id_required"
-        assert rig.calls.empty()
-        initial: Final = tuple(rig.chat(key, f"device-{index}") for index, key in enumerate(keys))
+        initial: Final = tuple(rig.chat(key, None) for key in keys)
         assert tuple(reply.status_code for reply in initial) == (200, 200, 200, 200), tuple(
             reply.text for reply in initial
         )
         expected: Final = (*tuple(r.id for r in rig.config.primaries), rig.config.fallback.id, rig.config.fallback.id)
         assert tuple(reply.headers["x-litellm-model-id"] for reply in initial) == expected
         for index, key in enumerate(keys):
-            conflict: Final = rig.chat(key, "other-device")
-            assert conflict.status_code == 409, conflict.text
-            assert conflict.json()["error"]["code"] == "key_bound_to_another_device"
-            accepted: Final = rig.chat(key, f"device-{index}")
+            changed: Final = rig.chat(key, "other-device")
+            assert changed.status_code == 200, changed.text
+            assert changed.headers["x-litellm-model-id"] == expected[index]
+            accepted: Final = rig.chat(key, None, metadata={"user_id": "not-json"})
             assert accepted.status_code == 200, accepted.text
             assert accepted.headers["x-litellm-model-id"] == expected[index]
         limited_key: Final = str(
@@ -331,7 +327,7 @@ def test_real_proxy_enforces_device_binding_and_sticky_primary_and_fallback(rig:
         )
         try:
             assert rig.chat(limited_key, "limited-device").status_code == 200
-            limited: Final = rig.chat(limited_key, "limited-device")
+            limited: Final = rig.chat(limited_key, "changed-device")
             assert limited.status_code == 429, limited.text
             assert limited.json()["error"]["code"] == "client_rate_limit_exceeded", limited.text
             assert float(limited.headers.get("retry-after", "0")) > 0
@@ -365,8 +361,9 @@ def test_cancelled_client_stream_does_not_release_an_upstream_that_is_still_runn
         next_client: Final = rig.chat(keys[1], "other-device")
         assert next_client.status_code == 200, next_client.text
         assert next_client.headers["x-litellm-model-id"] == rig.config.primaries[1].id
-        conflict: Final = rig.chat(keys[0], "other-device")
-        assert conflict.status_code == 409, conflict.text
+        changed: Final = rig.chat(keys[0], "other-device")
+        assert changed.status_code == 429, changed.text
+        assert changed.json()["error"]["code"] == "client_rate_limit_exceeded"
     finally:
         rig.stream_release.set()
         rig.proxy.post("/key/delete", {"keys": list(keys)})
@@ -405,13 +402,23 @@ def test_confirmed_failure_moves_next_request_and_actual_generation_probe_recove
         rig.proxy.post("/key/delete", {"keys": [key]})
 
 
-def test_two_workers_resolve_first_device_race_and_fail_closed_after_state_loss(rig: Rig) -> None:
+def test_two_workers_share_key_assignment_across_devices_and_fail_closed_after_state_loss(rig: Rig) -> None:
     key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             replies: Final = tuple(executor.map(lambda device: rig.chat(key, device), ("left", "right")))
-        assert sorted(reply.status_code for reply in replies) == [200, 409], tuple(reply.text for reply in replies)
-        assert rig.calls.get(timeout=5) == rig.config.primaries[0].id
+        assert all(reply.status_code in (200, 429) for reply in replies), tuple(reply.text for reply in replies)
+        for reply in replies:
+            if reply.status_code == 200:
+                assert reply.headers["x-litellm-model-id"] == rig.config.primaries[0].id
+                assert rig.calls.get(timeout=5) == rig.config.primaries[0].id
+                continue
+            assert reply.json()["error"]["code"] == "client_rate_limit_exceeded"
+        for device in ("left", "right"):
+            repeated: Final = rig.chat(key, device)
+            assert repeated.status_code == 200, repeated.text
+            assert repeated.headers["x-litellm-model-id"] == rig.config.primaries[0].id
+            assert rig.calls.get(timeout=5) == rig.config.primaries[0].id
         redis: Final = Redis(host=os.environ["REDIS_HOST"], port=int(os.environ["REDIS_PORT"]))
         try:
             redis.delete(f"litellm:exclusive-pool:{{{rig.config.pool_id}}}:state")
@@ -475,8 +482,9 @@ def test_standard_model_api_addition_and_removal_update_pool_without_restart(rig
         assert moved.status_code == 200, moved.text
         assert rig.config.fallback is not None
         assert moved.headers["x-litellm-model-id"] == rig.config.fallback.id
-        conflict: Final = rig.chat(keys[2], "another-device")
-        assert conflict.status_code == 409, conflict.text
+        changed: Final = rig.chat(keys[2], "another-device")
+        assert changed.status_code == 200, changed.text
+        assert changed.headers["x-litellm-model-id"] == moved.headers["x-litellm-model-id"]
     finally:
         rig.proxy.post("/key/delete", {"keys": list(keys)})
         redis.close()
@@ -568,7 +576,7 @@ def test_multiple_models_share_physical_ownership_through_standard_model_api(rig
         assert rig.upstream_models.get(timeout=5) == "exclusive-test-model"
         for model in aliases:
             switched: Final = eventually(
-                lambda: rig.chat(keys[0], "device", model=f"{rig.config.models[0]}-{model}"),
+                lambda selected=model: rig.chat(keys[0], "device", model=f"{rig.config.models[0]}-{selected}"),
                 lambda reply: reply.status_code == 200,
             )
             assert switched.headers["x-litellm-model-id"] == f"{rig.config.primaries[0].id}-{model}", switched.text
@@ -584,8 +592,9 @@ def test_multiple_models_share_physical_ownership_through_standard_model_api(rig
         shared: Final = rig.chat(keys[3], "device", model=public_models[1])
         assert shared.status_code == 200, shared.text
         assert shared.headers["x-litellm-model-id"] == f"{rig.config.fallback.id}-sonnet"
-        conflict: Final = rig.chat(keys[0], "other-device", model=public_models[2])
-        assert conflict.status_code == 409, conflict.text
+        changed: Final = rig.chat(keys[0], "other-device", model=public_models[2])
+        assert changed.status_code == 200, changed.text
+        assert changed.headers["x-litellm-model-id"] == f"{rig.config.primaries[0].id}-haiku"
     finally:
         rig.proxy.post("/key/delete", {"keys": list(keys)})
         for resource in rig.config.resources:
@@ -595,7 +604,7 @@ def test_multiple_models_share_physical_ownership_through_standard_model_api(rig
 
 
 @pytest.mark.parametrize("rig", [False, "anthropic"], indirect=True)
-def test_messages_share_assignments_device_binding_and_fallback_with_chat(rig: Rig) -> None:
+def test_messages_share_key_assignments_and_fallback_with_chat_across_device_changes(rig: Rig) -> None:
     keys: Final = tuple(
         str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"]) for _ in range(3)
     )
@@ -605,11 +614,12 @@ def test_messages_share_assignments_device_binding_and_fallback_with_chat(rig: R
         assert first.status_code == 200, first.text
         assert first.json()["type"] == "message"
         assert first.json()["content"][0]["text"] == rig.config.primaries[0].id
-        chat: Final = rig.chat(keys[0], "desktop")
+        chat: Final = rig.chat(keys[0], None)
         assert chat.status_code == 200, chat.text
         assert chat.headers["x-litellm-model-id"] == first.headers["x-litellm-model-id"]
-        conflict: Final = rig.messages(keys[0], "another-desktop")
-        assert conflict.status_code == 409, conflict.text
+        changed: Final = rig.messages(keys[0], "another-desktop")
+        assert changed.status_code == 200, changed.text
+        assert changed.headers["x-litellm-model-id"] == first.headers["x-litellm-model-id"]
         rest: Final = tuple(rig.messages(key, "desktop") for key in keys[1:])
         assert tuple(reply.status_code for reply in rest) == (200, 200), tuple(reply.text for reply in rest)
         assert tuple(reply.headers["x-litellm-model-id"] for reply in rest) == (
@@ -792,7 +802,7 @@ def test_messages_server_references_pin_the_account_and_block_cross_account_fall
         rig.fail_primary.set()
         failed: Final = rig.messages(
             key,
-            "desktop",
+            "new-desktop-session",
             container="container-one",
             messages=[
                 {
@@ -811,7 +821,7 @@ def test_messages_server_references_pin_the_account_and_block_cross_account_fall
             }
         ]
         assert rig.payloads.get(timeout=5)["container"] == "container-one"
-        retry: Final = rig.messages(key, "desktop", container="container-one")
+        retry: Final = rig.messages(key, "third-desktop-session", container="container-one")
         assert retry.status_code == 503, retry.text
         assert rig.calls.empty()
         assert rig.counts.get(timeout=5)[0] == resource
