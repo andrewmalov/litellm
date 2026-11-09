@@ -4,9 +4,11 @@ Claude Desktop can send `POST /v1/messages?beta=true` to the proxy using the sam
 
 The pool accepts text, client `tool_use` / `tool_result` history, thinking blocks, images and documents. Images and documents can use inline base64 data, URLs, or provider file sources. Documents can also contain inline text or content blocks. Nested attachments inside client tool results are supported. Send the complete conversation on each request
 
-Before generating a request with attachments or server state, the pool calls `POST /v1/messages/count_tokens` on the selected physical upstream using its own credentials. It atomically reserves the counted input plus the allowed output against both key and upstream TPM limits. System prompts, tools, thinking settings and output configuration are included in counting. A missing, failing or malformed count endpoint returns HTTP 503 with `pool_token_count_unavailable` before generation. A key TPM overflow returns HTTP 429; upstream capacity exhaustion returns HTTP 503. Unsent reservations are released
+Before generation, the pool estimates input locally with LiteLLM's tokenizer for the selected deployment and atomically reserves input plus the allowed output against both key and upstream TPM limits. System prompts, tools, tool results and output schemas contribute tokens rather than JSON bytes. Completion reconciles the reservation with response usage, including cached input. The pool sends no additional Count Tokens HTTP requests. If local counting is unavailable, it returns HTTP 503 with `pool_token_count_unavailable`. A key TPM overflow returns HTTP 429; upstream capacity exhaustion returns HTTP 503. Unsent reservations are released
 
-Every upstream used for these requests must expose the Anthropic Count Tokens endpoint at the same API base as generation. The pool delegates media fetching to the upstream and does not download arbitrary client URLs itself
+Text-only Messages requests use this same count with or without tools, including system prompts, tool definitions and tool history. Their JSON byte size is not reserved as a token count. Client tools keep portable context and normal failover
+
+Inline text documents are tokenized locally. Inline PDFs use the existing local PDF estimator when its parser is installed. Images, opaque documents, URL or file references and unknown server blocks receive nonzero default estimates. The pool does not download client URLs or tokenizer files for counting. It uses the packaged Claude tokenizer for Claude and a local OpenAI encoding as the fallback for other families. These media estimates can differ from provider usage because remote contents and provider preprocessing are unavailable locally
 
 Provider `file_id`, `container_upload`, server tool results and existing `container` references require a live assignment on the same key. The caller must create or upload these objects on that assigned physical upstream. The pool neither discovers their owner nor copies provider files or execution containers between accounts. The standard Files API does not automatically select an exclusive-pool assignment
 
@@ -24,7 +26,7 @@ The deployment template uses native Messages directly. Remove `litellm_settings.
 
 Streaming responses retain Anthropic SSE events. The pool waits for `message_stop` before releasing an operation. Interrupted streams retain the existing quarantine behavior. Input reservation includes the system prompt, conversation and tool definitions; usage settlement includes cached input tokens. For portable context, a confirmed upstream failure moves the next request under the existing pool rules and never silently replays a partially generated request
 
-Use image `cr.selcloud.ru/ttkdc/litellm:exclusive-pool-key-identity-20261106` or its published digest. Update the model registrations and mounted proxy YAML as described above when deploying over an existing installation; changing the image alone does not replace mounted configuration. Replace all workers sharing pool Redis state together, since older workers do not preserve the new reservation and affinity fields
+Use image `cr.selcloud.ru/ttkdc/litellm:exclusive-pool-local-tokens-20261109` or its published digest. Update the model registrations and mounted proxy YAML as described above when deploying over an existing installation; changing the image alone does not replace mounted configuration. Replace all workers sharing pool Redis state together, since older workers do not preserve the new reservation and affinity fields
 
 To check generation, set `PROXY_URL`, `LITELLM_API_KEY` and `MODEL_NAME` to your deployment values and run:
 
@@ -43,7 +45,7 @@ jq -n --arg model "$MODEL_NAME" '{
 
 The response should have `type: message` and an assistant text block. Repeat with `stream: true` in the JSON and `curl -N` to check SSE through `message_stop`. Use a dedicated key because this check assigns it an upstream and charges the usual model cost
 
-To check a real image, set `IMAGE_PATH` to a local image and `IMAGE_MEDIA_TYPE` to its MIME type, for example `image/png`. Run against an upstream that supports both Messages and Count Tokens:
+To check a real image, set `IMAGE_PATH` to a local image and `IMAGE_MEDIA_TYPE` to its MIME type, for example `image/png`. Run against an upstream that supports Messages:
 
 ```bash
 base64 < "$IMAGE_PATH" | jq -Rs --arg model "$MODEL_NAME" --arg media_type "$IMAGE_MEDIA_TYPE" '{

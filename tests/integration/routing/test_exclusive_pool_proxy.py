@@ -663,48 +663,67 @@ def test_messages_client_rpm_limit_is_enforced_before_upstream(rig: Rig) -> None
 @pytest.mark.parametrize("rig", [False, "anthropic"], indirect=True)
 def test_messages_confirmed_failure_moves_next_request_without_replaying(rig: Rig) -> None:
     key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    tools: Final = [{"name": "lookup", "input_schema": {"type": "object", "properties": {}}}]
     rig.fail_primary.set()
     try:
-        failed: Final = rig.messages(key, "desktop")
+        failed: Final = rig.messages(key, "desktop", tools=tools)
         assert failed.status_code == 503, failed.text
         assert rig.calls.get(timeout=5) == rig.config.primaries[0].id
         assert rig.calls.empty()
-        moved: Final = rig.messages(key, "desktop")
+        moved: Final = rig.messages(key, "desktop", tools=tools)
         assert moved.status_code == 200, moved.text
         assert moved.headers["x-litellm-model-id"] == rig.config.primaries[1].id
+        assert rig.counts.empty()
     finally:
         rig.proxy.post("/key/delete", {"keys": [key]})
 
 
 @pytest.mark.parametrize("rig", [False, "anthropic"], indirect=True)
-def test_messages_tool_history_reaches_the_assigned_upstream(rig: Rig) -> None:
+@pytest.mark.parametrize("with_tools", [False, True])
+def test_messages_large_text_is_estimated_locally_on_the_assigned_upstream(rig: Rig, with_tools: bool) -> None:
     key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    description: Final = "x" * rig.config.client_limits.tpm
+    system_text: Final = "y" * rig.config.client_limits.tpm
+    tools: Final = (
+        [
+            {
+                "name": "lookup",
+                "description": description,
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ]
+        if with_tools
+        else []
+    )
+    system: Final = [{"type": "text", "text": system_text}]
+    messages: Final = (
+        [
+            {"role": "user", "content": "look up a value"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-1", "name": "lookup", "input": {}}]},
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "result-marker"}],
+            },
+        ]
+        if with_tools
+        else [{"role": "user", "content": "hello"}]
+    )
     try:
         response: Final = rig.messages(
             key,
             "desktop",
-            tools=[
-                {
-                    "name": "lookup",
-                    "description": "Look up a value",
-                    "input_schema": {"type": "object", "properties": {}},
-                }
-            ],
-            messages=[
-                {"role": "user", "content": "look up a value"},
-                {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-1", "name": "lookup", "input": {}}]},
-                {
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "result-marker"}],
-                },
-            ],
+            tools=tools,
+            system=system,
+            messages=messages,
         )
         assert response.status_code == 200, response.text
         payload: Final = rig.payloads.get(timeout=5)
-        assert "result-marker" in json.dumps(payload["messages"])
-        assert "lookup" in json.dumps(payload["tools"])
-        assert "Answer briefly" in json.dumps(payload)
-        assert "exclusive_endpoint_pool" not in json.dumps(payload)
+        assert ("result-marker" if with_tools else "hello") in json.dumps(payload["messages"])
+        if with_tools:
+            assert "lookup" in json.dumps(payload["tools"])
+            assert description in json.dumps(payload["tools"])
+        assert system_text in json.dumps(payload)
+        assert rig.counts.empty()
         assert response.headers["x-litellm-model-id"] == rig.config.primaries[0].id
     finally:
         rig.proxy.post("/key/delete", {"keys": [key]})
@@ -721,7 +740,7 @@ def test_messages_tool_history_reaches_the_assigned_upstream(rig: Rig) -> None:
         {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "document text"}},
     ],
 )
-def test_messages_attachments_are_counted_on_assigned_account_and_forwarded_unchanged(
+def test_messages_attachments_are_estimated_locally_and_forwarded_unchanged(
     rig: Rig,
     block: dict[str, object],
 ) -> None:
@@ -730,10 +749,6 @@ def test_messages_attachments_are_counted_on_assigned_account_and_forwarded_unch
     try:
         response: Final = rig.messages(key, "desktop", messages=messages)
         assert response.status_code == 200, response.text
-        resource, count = rig.counts.get(timeout=5)
-        assert resource == response.headers["x-litellm-model-id"]
-        assert count["messages"] == messages
-        assert count["system"] == [{"type": "text", "text": "Answer briefly"}]
         assert rig.payloads.get(timeout=5)["messages"] == messages
         assert rig.counts.empty()
     finally:
@@ -741,36 +756,28 @@ def test_messages_attachments_are_counted_on_assigned_account_and_forwarded_unch
 
 
 @pytest.mark.parametrize("rig", ["anthropic"], indirect=True)
-@pytest.mark.parametrize("system,status", [("count-unavailable", 503), ("count-too-large", 429)])
-def test_messages_failed_attachment_count_never_generates_and_rolls_back_admission(
-    rig: Rig,
-    system: str,
-    status: int,
+@pytest.mark.parametrize("system,tpm_limit,status", [("count-unavailable", 60000, 200), ("ordinary text", 32, 429)])
+@pytest.mark.parametrize("with_tools", [False, True])
+def test_messages_use_local_estimates_and_reject_real_budget_overflow(
+    rig: Rig, system: str, tpm_limit: int, status: int, with_tools: bool
 ) -> None:
-    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    key: Final = str(
+        rig.proxy.post("/key/generate", {"models": list(rig.config.models), "tpm_limit": tpm_limit})["key"]
+    )
     try:
         response: Final = rig.messages(
             key,
             "desktop",
             system=system,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "url",
-                                "url": "https://example.invalid/image.png",
-                            },
-                        }
-                    ],
-                }
-            ],
+            messages=[{"role": "user", "content": "local token budget " * 100}],
+            tools=[{"name": "lookup", "input_schema": {"type": "object", "properties": {}}}] if with_tools else [],
         )
         assert response.status_code == status, response.text
+        assert rig.counts.empty()
+        if status == 200:
+            assert rig.calls.get(timeout=5) == response.headers["x-litellm-model-id"]
+            return
         assert rig.calls.empty()
-        assert rig.counts.get(timeout=5)[1]["system"] == system
         recovered: Final = rig.messages(key, "desktop")
         assert recovered.status_code == 200, recovered.text
         assert rig.calls.get(timeout=5) == recovered.headers["x-litellm-model-id"]
@@ -824,11 +831,7 @@ def test_messages_server_references_pin_the_account_and_block_cross_account_fall
         retry: Final = rig.messages(key, "third-desktop-session", container="container-one")
         assert retry.status_code == 503, retry.text
         assert rig.calls.empty()
-        assert rig.counts.get(timeout=5)[0] == resource
-        assert rig.counts.get(timeout=5)[0] == resource
         assert rig.counts.empty()
-        assert rig.generation_betas.get(timeout=5) <= rig.count_betas.get(timeout=5)
-        assert rig.generation_betas.get(timeout=5) <= rig.count_betas.get(timeout=5)
     finally:
         rig.proxy.post("/key/delete", {"keys": [key]})
 
@@ -858,8 +861,6 @@ def test_messages_portable_attachment_failure_can_move_to_another_account(rig: R
         assert moved.status_code == 200, moved.text
         assert rig.calls.get(timeout=5) == rig.config.primaries[0].id
         assert rig.calls.get(timeout=5) == rig.config.primaries[1].id
-        assert rig.counts.get(timeout=5)[0] == rig.config.primaries[0].id
-        assert rig.counts.get(timeout=5)[0] == rig.config.primaries[1].id
         assert rig.counts.empty()
         assert rig.calls.empty()
     finally:
@@ -895,7 +896,6 @@ def test_messages_attachment_reaches_strict_fallback_without_duplicate_content_t
         )
         assert response.status_code == 200, response.text
         assert response.headers["x-litellm-model-id"] == rig.config.fallback.id
-        assert rig.counts.get(timeout=5)[0] == rig.config.fallback.id
         assert rig.counts.empty()
         assert tuple(rig.calls.get(timeout=5) for _ in range(3)) == tuple(r.id for r in rig.config.resources)
         assert rig.calls.empty()

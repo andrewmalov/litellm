@@ -408,9 +408,9 @@ class _MessageCountParams:
 
 def token_counter(
     model="",
-    custom_tokenizer: dict | SelectTokenizerResponse | None = None,
+    custom_tokenizer: SelectTokenizerResponse | None = None,
     text: str | list[str] | None = None,
-    messages: Sequence[AllMessageValues | Message] | None = None,
+    messages: Sequence[AllMessageValues | Message | Mapping[str, object]] | None = None,
     count_response_tokens: bool | None = False,
     tools: list[ChatCompletionToolParam] | None = None,
     tool_choice: ChatCompletionNamedToolChoiceParam | None = None,
@@ -997,8 +997,7 @@ def _count_content_list(
                 # Claude extended thinking content block
                 # Count the thinking text and skip the opaque blobs (signature, redacted data)
                 thinking_text = str(c.get("thinking", ""))
-                if thinking_text:
-                    num_tokens += count_function(thinking_text)
+                num_tokens += count_function(thinking_text)
             elif c["type"] == "tool_reference":
                 # Anthropic tool-search reference block: a lightweight pointer to
                 # a deferred tool, e.g. {"type": "tool_reference", "tool_name": ...}.
@@ -1010,6 +1009,8 @@ def _count_content_list(
                 tool_name = str(c.get("tool_name") or "")
                 if tool_name:
                     num_tokens += count_function(tool_name)
+            elif default_token_count is not None:
+                num_tokens += default_token_count
             else:
                 content_type = c.get("type", type(c).__name__) if isinstance(c, dict) else type(c).__name__
                 raise ValueError(

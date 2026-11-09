@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Annotated, Final
+from typing import TYPE_CHECKING, Final
 
-from pydantic import Field, JsonValue, TypeAdapter, ValidationError
+from pydantic import Field, JsonValue, ValidationError
 
-from litellm.exceptions import AuthenticationError
-from litellm.llms.anthropic.common_utils import AnthropicError
-from litellm.llms.anthropic.count_tokens.handler import AnthropicCountTokensHandler
-from litellm.llms.anthropic.pass_through.messages.transformation import AnthropicMessagesConfig
+from litellm._lazy_imports import get_default_encoding
+from litellm.constants import DEFAULT_IMAGE_TOKEN_COUNT
+from litellm.litellm_core_utils.token_counter import offload_token_count, token_counter
+from litellm.llms.anthropic.pass_through.messages.utils import anthropic_system_to_openai_message
+from litellm.rust_bridge.tokenizer import anthropic
+from litellm.types.utils import SelectTokenizerResponse
+from litellm.utils import huggingface_tokenizer_kind
 
 from .models import Failure, FrozenModel
 
@@ -40,90 +44,61 @@ def has_reference(value: JsonValue) -> bool:
     )
 
 
-def has_media(value: JsonValue) -> bool:
-    if isinstance(value, list):
-        return any(has_media(item) for item in value)
-    if not isinstance(value, dict):
-        return False
-    return value.get("type") in ("image", "document", "container_upload") or (
-        value.get("type") == "tool_result" and has_media(value.get("content"))
-    )
-
-
-class _Count(FrozenModel):
-    input_tokens: Annotated[int, Field(ge=0, strict=True)]
-
-
 class _Parameters(FrozenModel):
     model: str
-    api_key: str | None = Field(default=None, repr=False)
-    api_base: str | None = None
-    extra_headers: Mapping[str, str] = Field(default_factory=dict)
 
 
 class _Deployment(FrozenModel):
-    litellm_params: Mapping[str, object] = Field(repr=False)
-
-
-_ENVIRONMENT: Final = TypeAdapter(tuple[Mapping[str, str], str | None])
-_OPTIONS: Final = TypeAdapter(Mapping[str, JsonValue])
+    litellm_params: _Parameters = Field(repr=False)
 
 
 def count_unavailable() -> Failure:
     return Failure(
         code="pool_token_count_unavailable",
         status=503,
-        message="This upstream must support Anthropic Count Tokens for pool attachments and server references",
+        message="Local input token estimation is unavailable",
     )
 
 
-async def count_input_tokens(request: RequestView, deployment: Mapping[str, object]) -> int | Failure:
+def estimate_input_tokens(request: RequestView, deployment: Mapping[str, object]) -> int | Failure:
     try:
-        configured: Final = _Deployment.model_validate(deployment).litellm_params
-        parameters: Final = _Parameters.model_validate(configured)
-        options: Final = _OPTIONS.validate_python(
-            {
-                key: value
-                for key, value in (
-                    ("tools", [dict(tool) for tool in request.tools] or None),
-                    ("container", request.container),
-                    ("tool_choice", request.tool_choice),
-                    ("thinking", request.thinking),
-                    ("output_config", dict(request.output_config) if request.output_config is not None else None),
-                )
-                if value is not None
-            }
+        model: Final = _Deployment.model_validate(deployment).litellm_params.model.split("/", 1)[-1]
+        tokenizer: Final[SelectTokenizerResponse] = (
+            {"type": "huggingface_tokenizer", "tokenizer": anthropic()}
+            if huggingface_tokenizer_kind(model) == "anthropic"
+            else {"type": "openai_tokenizer", "tokenizer": get_default_encoding()}
         )
-        api: Final = AnthropicMessagesConfig()
-        headers, _ = _ENVIRONMENT.validate_python(
-            await api.avalidate_anthropic_messages_environment(  # pyright: ignore[reportUnknownMemberType]  # untyped
-                headers={
-                    **parameters.extra_headers,
-                    **(
-                        {"anthropic-beta": request.proxy_server_request.headers["anthropic-beta"]}
-                        if request.proxy_server_request is not None
-                        and "anthropic-beta" in request.proxy_server_request.headers
-                        else {}
-                    ),
-                },
-                model=parameters.model.split("/", 1)[-1],
-                messages=[dict(message) for message in request.messages],
-                optional_params=dict(options),
-                litellm_params=dict(configured),
-                api_key=parameters.api_key,
-                api_base=parameters.api_base,
+        system: Final = anthropic_system_to_openai_message(request.system)
+        messages: Final = (*((system,) if system is not None else ()), *request.messages)
+        context_tokens: Final = token_counter(
+            model=model,
+            messages=messages,
+            custom_tokenizer=tokenizer,
+            use_default_image_token_count=True,
+            default_token_count=DEFAULT_IMAGE_TOKEN_COUNT,
+        )
+        options: Final = {
+            key: value
+            for key, value in (
+                ("tools", request.tools or None),
+                ("functions", request.functions or None),
+                ("response_format", request.response_format),
+                ("output_config", request.output_config),
+                ("output_format", request.output_format),
+                ("tool_choice", request.tool_choice),
+                ("function_call", request.function_call),
             )
+            if value is not None
+        }
+        extra_tokens: Final = (
+            token_counter(model=model, custom_tokenizer=tokenizer, text=json.dumps(options, ensure_ascii=False))
+            if options
+            else 0
         )
-        response: Final = await AnthropicCountTokensHandler().handle_count_tokens_request(
-            model=parameters.model.split("/", 1)[-1],
-            messages=[dict(message) for message in request.messages],
-            auth_header=headers,
-            api_base=parameters.api_base,
-            timeout=10,
-            tools=[dict(tool) for tool in request.tools] or None,
-            system=request.system,
-            optional_params=options,
-        )
-        return _Count.model_validate(response).input_tokens
-    except (AnthropicError, AuthenticationError, ValidationError):
+        return context_tokens + extra_tokens if context_tokens > 0 else count_unavailable()
+    except (ValidationError, ValueError, TypeError):
         return count_unavailable()
+
+
+async def count_input_tokens(request: RequestView, deployment: Mapping[str, object]) -> int | Failure:
+    return await offload_token_count(estimate_input_tokens)(request, deployment)

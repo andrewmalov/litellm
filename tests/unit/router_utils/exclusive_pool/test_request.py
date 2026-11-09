@@ -2,6 +2,7 @@ from typing import Final
 
 import pytest
 
+from litellm.router_utils.exclusive_pool.context import estimate_input_tokens
 from litellm.router_utils.exclusive_pool.models import Failure
 from litellm.router_utils.exclusive_pool.request import PoolProxyException, RequestView, Ticket, verified_ticket
 
@@ -28,7 +29,8 @@ def test_ticket_cannot_be_forged_or_moved_to_another_operation() -> None:
 
 def test_reservation_covers_text_and_output_without_storing_content() -> None:
     body: Final = RequestView(model="alias", messages=({"role": "user", "content": "hello"},), max_tokens=12)
-    assert body.reserved_tokens(12) >= len(b"hello") + 12
+    assert _estimate(body) > 0
+    assert body.counted_reservation(_estimate(body), 12) == _estimate(body) + 12
     assert body.output_limit(256) == 12
     assert body.model_copy(update={"max_tokens": None}).output_limit(256) == 256
 
@@ -89,7 +91,7 @@ def test_legacy_functions_and_response_schema_are_included_in_input_reservation(
             "response_format": {"type": "json_schema", "schema": {"description": "y" * 5000}},
         }
     )
-    assert legacy.reserved_tokens(16) >= base.reserved_tokens(16) + 10000
+    assert _estimate(legacy) > _estimate(base)
 
 
 def test_router_stamped_deployment_identity_takes_precedence_over_caller_metadata() -> None:
@@ -140,7 +142,7 @@ def test_anthropic_system_prompt_is_included_in_token_reservation() -> None:
     base: Final = {"model": "alias", "messages": [{"role": "user", "content": "hi"}]}
     short: Final = RequestView.model_validate(base)
     long: Final = RequestView.model_validate({**base, "system": [{"type": "text", "text": "s" * 5000}]})
-    assert long.reserved_tokens(16) >= short.reserved_tokens(16) + 5000
+    assert _estimate(long) > _estimate(short)
 
 
 def test_anthropic_response_usage_counts_cached_input_as_well_as_output() -> None:
@@ -229,10 +231,11 @@ def test_chat_ticket_is_not_valid_for_nested_anthropic_adapter_calls() -> None:
         ],
     ],
 )
-def test_anthropic_media_and_file_references_require_provider_token_count(content: list[dict[str, object]]) -> None:
+def test_anthropic_media_and_file_references_are_supported(content: list[dict[str, object]]) -> None:
     request: Final = RequestView.model_validate({"model": "alias", "messages": [{"role": "user", "content": content}]})
     assert request.supports("anthropic_messages")
-    assert request.needs_count
+    baseline: Final = RequestView(model="alias", messages=({"role": "user", "content": ""},))
+    assert _estimate(request) > _estimate(baseline)
 
 
 def test_anthropic_container_reference_requires_existing_account_binding() -> None:
@@ -270,7 +273,7 @@ def test_anthropic_output_schema_is_included_in_input_reservation(field: str) ->
     base: Final = {"model": "alias", "messages": [{"role": "user", "content": "hello"}]}
     plain: Final = RequestView.model_validate(base)
     schema: Final = RequestView.model_validate({**base, field: {"schema": {"description": "x" * 5000}}})
-    assert schema.reserved_tokens(16) >= plain.reserved_tokens(16) + 5000
+    assert _estimate(schema) > _estimate(plain)
 
 
 def test_anthropic_error_event_cannot_be_followed_by_successful_completion() -> None:
@@ -295,7 +298,6 @@ def test_inline_and_url_images_can_move_between_accounts(source: dict[str, str])
         }
     )
     assert request.supports("anthropic_messages")
-    assert request.needs_count
     assert not request.requires_binding
     assert not request.pin_upstream
 
@@ -310,7 +312,6 @@ def test_server_tool_creation_pins_account_before_references_are_returned() -> N
     )
     assert request.supports("anthropic_messages")
     assert request.pin_upstream
-    assert request.needs_count
     assert not request.requires_binding
 
 
@@ -364,14 +365,13 @@ def test_custom_tool_input_field_names_do_not_create_server_reference_semantics(
     assert request.supports("anthropic_messages")
     assert not request.requires_binding
     assert not request.pin_upstream
-    assert not request.needs_count
 
 
-def test_attachment_reservation_keeps_legacy_output_schema_cost_even_when_provider_cannot_count_it() -> None:
+def test_local_reservation_includes_output_schema_and_output_allowance() -> None:
     plain: Final = RequestView(model="alias", messages=({"role": "user", "content": "hello"},))
     schema: Final = plain.model_copy(update={"output_format": {"schema": {"description": "x" * 5000}}})
     assert plain.counted_reservation(100, 16) == 116
-    assert schema.counted_reservation(100, 16) >= plain.counted_reservation(100, 16) + 5000
+    assert schema.counted_reservation(_estimate(schema), 16) > plain.counted_reservation(_estimate(plain), 16)
 
 
 @pytest.mark.parametrize("kind", ["computer", "bash", "text_editor", "memory"])
@@ -385,4 +385,77 @@ def test_client_executed_builtin_tools_keep_portable_context_and_fallback(kind: 
     )
     assert request.supports("anthropic_messages")
     assert not request.pin_upstream
-    assert not request.needs_count
+
+
+def _estimate(request: RequestView) -> int:
+    result: Final = estimate_input_tokens(request, {"litellm_params": {"model": "unknown-pool-model"}})
+    assert isinstance(result, int)
+    return result
+
+
+def test_unknown_attachment_estimates_preserve_surrounding_text_and_each_reference() -> None:
+    text: Final = {"type": "text", "text": "long context " * 1000}
+    upload: Final = {"type": "container_upload", "file_id": "file-1"}
+    base: Final = RequestView.model_validate({"model": "alias", "messages": [{"role": "user", "content": [text]}]})
+    attached: Final = RequestView.model_validate(
+        {"model": "alias", "messages": [{"role": "user", "content": [text, upload, upload]}]}
+    )
+    from litellm.constants import DEFAULT_IMAGE_TOKEN_COUNT
+
+    assert _estimate(attached) == _estimate(base) + 2 * DEFAULT_IMAGE_TOKEN_COUNT
+
+
+def test_tool_array_schema_without_items_is_estimated_locally() -> None:
+    base: Final = RequestView(model="alias", messages=({"role": "user", "content": "hello"},))
+    request: Final = RequestView.model_validate(
+        {
+            **base.model_dump(),
+            "tools": [
+                {"name": "lookup", "input_schema": {"type": "object", "properties": {"values": {"type": "array"}}}}
+            ],
+        }
+    )
+    assert _estimate(request) > _estimate(base)
+
+
+@pytest.mark.parametrize("encoding", ["text", "content"])
+def test_inline_document_text_is_tokenized_as_content(encoding: str) -> None:
+    base: Final = RequestView(model="alias", messages=({"role": "user", "content": "hello"},))
+    source: Final = (
+        {"type": "text", "data": "document text " * 1000}
+        if encoding == "text"
+        else {"type": "content", "content": [{"type": "text", "text": "document text " * 1000}]}
+    )
+    request: Final = RequestView.model_validate(
+        {"model": "alias", "messages": [{"role": "user", "content": [{"type": "document", "source": source}]}]}
+    )
+    assert _estimate(request) > _estimate(base)
+
+
+def test_inline_image_reservation_does_not_charge_base64_bytes_as_tokens() -> None:
+    source: Final = {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}
+    small: Final = RequestView.model_validate(
+        {"model": "alias", "messages": [{"role": "user", "content": [{"type": "image", "source": source}]}]}
+    )
+    large: Final = RequestView.model_validate(
+        {
+            "model": "alias",
+            "messages": [
+                {"role": "user", "content": [{"type": "image", "source": {**source, "data": "aGVsbG8=" * 20000}}]}
+            ],
+        }
+    )
+    assert _estimate(large) == _estimate(small) > 0
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai"])
+def test_provider_prefix_does_not_change_local_model_tokenizer(provider: str) -> None:
+    from litellm.litellm_core_utils.token_counter import token_counter
+
+    model: Final = "claude-opus-5-5"
+    request: Final = RequestView(
+        model="public-alias", messages=({"role": "user", "content": "Compare local token estimates"},)
+    )
+    expected: Final = token_counter(model=model, messages=request.messages)
+    assert estimate_input_tokens(request, {"litellm_params": {"model": model}}) == expected
+    assert estimate_input_tokens(request, {"litellm_params": {"model": f"{provider}/{model}"}}) == expected

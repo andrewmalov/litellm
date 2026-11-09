@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 from collections.abc import Mapping
 from typing import Annotated, Final, NoReturn
 
@@ -112,41 +111,11 @@ class RequestView(FrozenModel):
             or any(not client_tool(tool.get("type")) for tool in self.tools)
         )
 
-    @property
-    def needs_count(self) -> bool:
-        from .context import has_media
-
-        return self.pin_upstream or any(has_media(message.get("content")) for message in self.messages)
-
     def output_limit(self, server_limit: int) -> int:
         return min(self.max_completion_tokens or self.max_tokens or server_limit, server_limit)
 
-    def reserved_tokens(self, output_limit: int) -> int:
-        encoded: Final = json.dumps(
-            {
-                "messages": self.messages,
-                "system": self.system,
-                "tools": self.tools,
-                "functions": self.functions,
-                "response_format": self.response_format,
-                "output_config": self.output_config,
-                "output_format": self.output_format,
-                "tool_choice": self.tool_choice,
-                "function_call": self.function_call,
-            },
-            ensure_ascii=False,
-        )
-        return len(encoded.encode()) + output_limit + 32 * len(self.messages)
-
     def counted_reservation(self, input_tokens: int, output_limit: int) -> int:
-        schemas: Final = tuple(
-            schema for schema in (self.output_format, self.response_format, self.functions) if schema
-        )
-        return (
-            input_tokens
-            + output_limit
-            + sum(len(json.dumps(schema, ensure_ascii=False).encode()) for schema in schemas)
-        )
+        return input_tokens + output_limit
 
     def ticket(self, secret: bytes) -> Ticket | None:
         return verified_ticket(self.metadata.get(TICKET_KEY, self.litellm_metadata.get(TICKET_KEY)), secret)

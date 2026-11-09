@@ -1932,3 +1932,22 @@ def test_messages_reach_token_count_honours_disable_token_counter(monkeypatch: p
     messages = _threshold_test_messages(turns=3)
     assert messages_reach_token_count(model="gpt-4o", messages=messages, threshold=0) is True
     assert messages_reach_token_count(model="gpt-4o", messages=messages, threshold=1) is False
+
+
+@pytest.mark.parametrize("before_text", [False, True])
+def test_default_block_estimates_preserve_text_and_count_each_unknown_attachment(before_text: bool) -> None:
+    from typing import Final
+
+    from litellm.litellm_core_utils.token_counter import token_counter
+
+    text: Final = {"type": "text", "text": "context " * 1000}
+    upload: Final = {"type": "container_upload", "file_id": "file-1"}
+    blocks: Final = [upload, upload, text] if before_text else [text, upload, upload]
+    baseline: Final = token_counter(model="unknown-pool-model", messages=[{"role": "user", "content": [text]}])
+    estimated: Final = token_counter(
+        model="unknown-pool-model",
+        messages=[{"role": "user", "content": blocks}],
+        use_default_image_token_count=True,
+        default_token_count=17,
+    )
+    assert estimated == baseline + 2 * 17

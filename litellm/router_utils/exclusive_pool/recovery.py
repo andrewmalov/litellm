@@ -11,7 +11,20 @@ from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 import litellm
 
-from .models import Charge, Denied, Event, FrozenModel, Granted, Health, Operation, Outcome, PoolConfig, Snapshot
+from .context import estimate_input_tokens
+from .models import (
+    Charge,
+    Denied,
+    Event,
+    Failure,
+    FrozenModel,
+    Granted,
+    Health,
+    Operation,
+    Outcome,
+    PoolConfig,
+    Snapshot,
+)
 from .request import recovery_request
 from .state import complete, exhausted, has_capacity, quarantine, record_event, reject
 
@@ -168,7 +181,11 @@ def claim_probe(state: Snapshot, config: PoolConfig, resource: str, operation: s
     scope_ids: Final = frozenset(r.id for r in config.resources if r.scope == target.scope)
     if health.status != "cooldown" or health.retry_at > now or any(op.resource in scope_ids for op in state.operations):
         return Denied(state=state, failure=exhausted())
-    tokens: Final = recovery_request(resource).reserved_tokens(1)
+    request: Final = recovery_request(resource)
+    estimate: Final = estimate_input_tokens(request, {"litellm_params": {"model": ""}})
+    if isinstance(estimate, Failure):
+        return Denied(state=state, failure=estimate)
+    tokens: Final = request.counted_reservation(estimate, 1)
     if not has_capacity(state, f"resource:{target.scope}", target.limits, tokens, now, operation):
         return Denied(state=state, failure=exhausted())
     probe: Final = Operation(

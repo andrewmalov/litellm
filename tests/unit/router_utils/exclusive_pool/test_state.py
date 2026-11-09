@@ -200,6 +200,20 @@ def test_provider_count_reservation_is_atomic_and_checks_both_quota_scopes() -> 
     assert counted.kind == "granted"
     assert all(charge.tokens == 9000 for charge in counted.state.charges)
     assert counted.state.operations[0].counted
+    parallel: Final = acquire(
+        counted.state,
+        cfg,
+        request("one", "other", "parallel").model_copy(update={"needs_count": True}),
+        now=2,
+    )
+    fits: Final = reserve_counted_tokens(parallel.state, cfg, "parallel", cfg.client_limits.tpm - 9000, None, now=3)
+    assert fits.kind == "granted"
+    combined: Final = reserve_counted_tokens(
+        parallel.state, cfg, "parallel", cfg.client_limits.tpm - 9000 + 1, None, now=3
+    )
+    assert combined.kind == "denied"
+    assert combined.failure.code == "client_rate_limit_exceeded"
+    assert combined.state == parallel.state
     denied: Final = reserve_counted_tokens(initial.state, cfg, "one", cfg.client_limits.tpm + 1, None, now=1)
     assert denied.kind == "denied"
     assert denied.failure.code == "client_rate_limit_exceeded"
