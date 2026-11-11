@@ -38,6 +38,7 @@ from litellm.litellm_core_utils.initialize_dynamic_callback_params import (
     validate_langfuse_span_scope_value,
     validate_no_callback_env_reference,
 )
+from litellm.models.budget import BudgetResetDay
 from litellm.proxy.auth.access_group_rules import AccessGroupRule, _validate_rules
 from litellm.proxy.mcp_server.stdio_gate import MCP_STDIO_DISABLED_MESSAGE, is_mcp_stdio_enabled
 from litellm.types.agents import (
@@ -1801,6 +1802,7 @@ class DeleteUserRequest(LiteLLMPydanticObjectBase):
 
 
 class BudgetNewRequest(LiteLLMPydanticObjectBase):
+    budget_reset_day: BudgetResetDay | None = None
     budget_id: str | None = Field(default=None, description="The unique budget id.")
     max_budget: float | None = Field(
         default=None,
@@ -3380,6 +3382,7 @@ class OrganizationUpdateRequestV2(LiteLLMPydanticObjectBase):
     max_parallel_requests: int | None = None
     model_max_budget: dict | None = None
     budget_duration: str | None = None
+    budget_reset_day: BudgetResetDay | None = None
     object_permission: LiteLLM_ObjectPermissionBase | None = None
 
 

@@ -7,11 +7,21 @@ Canonical definition for ``litellm_budgettable``. Re-exported from
 
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Final
+from typing import Annotated, Final, TypeAlias
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from litellm.types.llms.base import LiteLLMPydanticObjectBase
+
+BudgetResetDay: TypeAlias = Annotated[
+    int,
+    Field(
+        strict=True,
+        ge=1,
+        le=31,
+        description="Monthly reset day at 00:00 Europe/Moscow; short months use their last day",
+    ),
+]
 
 
 class LiteLLM_BudgetTable(LiteLLMPydanticObjectBase):
@@ -33,6 +43,7 @@ class LiteLLM_BudgetTable(LiteLLMPydanticObjectBase):
     model_tpm_limit: Mapping[str, int] | None = None
     model_rpm_limit: Mapping[str, int] | None = None
     budget_duration: str | None = None
+    budget_reset_day: BudgetResetDay | None = None
     allowed_models: list[str] | None = None  # per-member model scope; empty = inherit team models
     temp_budget_increase: float | None = None
     temp_budget_expiry: datetime | None = None

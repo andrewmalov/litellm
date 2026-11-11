@@ -1,5 +1,8 @@
+from calendar import monthrange
+from collections.abc import Mapping
 from datetime import datetime, time, timezone
 from typing import Final
+from zoneinfo import ZoneInfo
 
 from pydantic import ConfigDict
 
@@ -63,23 +66,63 @@ def get_budget_reset_settings() -> BudgetResetSettings:
     )
 
 
-def compute_budget_reset_at(budget_duration: str, settings: BudgetResetSettings) -> datetime:
+def compute_budget_reset_at(
+    budget_duration: str,
+    settings: BudgetResetSettings,
+    *,
+    budget_reset_day: int | None = None,
+    now: datetime | None = None,
+) -> datetime:
     """Compute the next reset time for a budget duration using injected settings."""
+    current_time: Final = now if now is not None else datetime.now(timezone.utc)
+    if budget_reset_day is not None:
+        local_time: Final = current_time.astimezone(ZoneInfo("Europe/Moscow"))
+        candidate: Final = local_time.replace(
+            day=min(budget_reset_day, monthrange(local_time.year, local_time.month)[1]),
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        if candidate > local_time:
+            return candidate.astimezone(timezone.utc)
+        year, month_index = divmod(local_time.year * 12 + local_time.month, 12)
+        month: Final = month_index + 1
+        return candidate.replace(
+            year=year, month=month, day=min(budget_reset_day, monthrange(year, month)[1])
+        ).astimezone(timezone.utc)
     return get_next_standardized_reset_time(
         duration=budget_duration,
-        current_time=datetime.now(timezone.utc),
+        current_time=current_time,
         timezone_str=settings.timezone,
         reset_time_of_day=settings.reset_time_of_day,
     )
 
 
-def get_budget_reset_time(budget_duration: str) -> datetime:
+def get_budget_reset_time(budget_duration: str, *, budget_reset_day: int | None = None) -> datetime:
     """Get the budget reset time using the globally-configured timezone and reset time.
 
     Thin wrapper over `compute_budget_reset_at` for callers that don't yet receive
     `BudgetResetSettings` by injection (creation/update endpoints, startup backfill).
     """
-    return compute_budget_reset_at(budget_duration, get_budget_reset_settings())
+    return compute_budget_reset_at(budget_duration, get_budget_reset_settings(), budget_reset_day=budget_reset_day)
+
+
+def budget_schedule_updates(updates: Mapping[str, object]) -> Mapping[str, object]:
+    if "budget_reset_day" in updates:
+        day: Final = updates["budget_reset_day"]
+        return {
+            "budget_reset_day": day,
+            "budget_duration": "1mo" if isinstance(day, int) else None,
+            "budget_reset_at": get_budget_reset_time("1mo", budget_reset_day=day) if isinstance(day, int) else None,
+        }
+    if "budget_duration" in updates:
+        duration: Final = updates["budget_duration"]
+        return {
+            "budget_reset_day": None,
+            "budget_reset_at": get_budget_reset_time(duration) if isinstance(duration, str) else None,
+        }
+    return {}
 
 
 def keeps_due_budget_reset(

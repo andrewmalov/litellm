@@ -1,7 +1,31 @@
 from datetime import datetime, time, timezone
+from typing import Final
 from zoneinfo import ZoneInfo
 
 import pytest
+
+
+@pytest.mark.parametrize(
+    ("current", "day", "expected"),
+    (
+        ("2026-11-14T20:59:59+00:00", 15, "2026-11-14T21:00:00+00:00"),
+        ("2026-11-14T21:00:00+00:00", 15, "2026-12-14T21:00:00+00:00"),
+        ("2026-12-31T21:00:00+00:00", 1, "2027-01-31T21:00:00+00:00"),
+        ("2027-02-01T00:00:00+00:00", 31, "2027-02-27T21:00:00+00:00"),
+        ("2028-02-01T00:00:00+00:00", 31, "2028-02-28T21:00:00+00:00"),
+        ("2027-02-27T21:00:00+00:00", 31, "2027-03-30T21:00:00+00:00"),
+    ),
+)
+def test_monthly_budget_reset_uses_preferred_day_at_moscow_midnight(current: str, day: int, expected: str) -> None:
+    from litellm.proxy.common_utils.timezone_utils import compute_budget_reset_at
+
+    result: Final = compute_budget_reset_at(
+        "1mo",
+        BudgetResetSettings(timezone="America/New_York", reset_time_of_day=time(12)),
+        budget_reset_day=day,
+        now=datetime.fromisoformat(current),
+    )
+    assert result == datetime.fromisoformat(expected)
 
 
 import litellm

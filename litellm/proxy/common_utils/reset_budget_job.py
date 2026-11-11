@@ -829,7 +829,11 @@ class ResetBudgetJob:
             budget_resets=tuple(
                 (
                     b.budget_id,
-                    compute_budget_reset_at(budget_duration=b.budget_duration, settings=self.reset_settings),
+                    compute_budget_reset_at(
+                        budget_duration=b.budget_duration,
+                        settings=self.reset_settings,
+                        budget_reset_day=b.budget_reset_day,
+                    ),
                 )
                 for b in budgets_to_reset
                 if b.budget_id is not None and b.budget_duration is not None

@@ -28872,6 +28872,8 @@ export interface components {
              * @description Datetime when the budget is reset
              */
             budget_reset_at?: string | null;
+            /** Budget Reset Day */
+            budget_reset_day?: number | null;
             /**
              * Max Budget
              * @description Requests will fail if this budget (in USD) is exceeded.
@@ -35540,6 +35542,8 @@ export interface components {
             budget_duration?: string | null;
             /** Budget Id */
             budget_id?: string | null;
+            /** Budget Reset Day */
+            budget_reset_day?: number | null;
             /** Max Budget */
             max_budget?: number | null;
             /** Max Parallel Requests */
@@ -35582,6 +35586,8 @@ export interface components {
             budget_id?: string | null;
             /** Budget Reset At */
             budget_reset_at?: string | null;
+            /** Budget Reset Day */
+            budget_reset_day?: number | null;
             /**
              * Created At
              * Format: date-time
@@ -40208,6 +40214,8 @@ export interface components {
              * @description Datetime when the budget is reset
              */
             budget_reset_at?: string | null;
+            /** Budget Reset Day */
+            budget_reset_day?: number | null;
             /** Default Model */
             default_model?: string | null;
             /**
@@ -40444,6 +40452,8 @@ export interface components {
             budget_duration?: string | null;
             /** Budget Id */
             budget_id?: string | null;
+            /** Budget Reset Day */
+            budget_reset_day?: number | null;
             /** Max Budget */
             max_budget?: number | null;
             /** Max Parallel Requests */
@@ -40553,6 +40563,8 @@ export interface components {
             budget_duration?: string | null;
             /** Budget Id */
             budget_id?: string | null;
+            /** Budget Reset Day */
+            budget_reset_day?: number | null;
             /** Description */
             description?: string | null;
             /** Guardrails */
@@ -41509,6 +41521,8 @@ export interface components {
         OrganizationUpdateRequestV2: {
             /** Budget Duration */
             budget_duration?: string | null;
+            /** Budget Reset Day */
+            budget_reset_day?: number | null;
             /** Max Budget */
             max_budget?: number | null;
             /** Max Parallel Requests */
@@ -50632,6 +50646,8 @@ export interface components {
             budget_duration?: string | null;
             /** Budget Id */
             budget_id?: string | null;
+            /** Budget Reset Day */
+            budget_reset_day?: number | null;
             /** Description */
             description?: string | null;
             /** Guardrails */
