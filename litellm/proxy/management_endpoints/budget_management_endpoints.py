@@ -14,14 +14,13 @@ All /budget management endpoints
 #### BUDGET TABLE MANAGEMENT ####
 import math
 from collections.abc import Mapping
-from types import MappingProxyType
 from typing import Final
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from litellm.proxy._types import *
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
-from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time
+from litellm.proxy.common_utils.timezone_utils import budget_schedule_updates, get_budget_reset_time
 from litellm.proxy.management_endpoints.common_utils import (  # noqa: F401  # legacy module exports
     _user_has_admin_view,  # pyright: ignore[reportPrivateUsage,reportUnusedImport]  # backwards-compatible package export
     user_api_key_has_admin_view,
@@ -98,10 +97,16 @@ async def new_budget(
 
     budget_obj_json: Final = budget_obj.model_dump(exclude_none=True)
     budget_obj_jsonified: Final[dict[str, object]] = jsonify_object(budget_obj_json)  # mutable-ok: prisma create input
+    schedule_updates: Final[Mapping[str, object]] = (
+        budget_schedule_updates(budget_obj.model_dump(exclude_unset=True))
+        if "budget_reset_day" in budget_obj.model_fields_set
+        else {}
+    )
     try:
         response: Final = await BudgetRepository(prisma_client).table.create(
             data={
                 **budget_obj_jsonified,
+                **schedule_updates,
                 "created_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
                 "updated_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
             }
@@ -176,21 +181,18 @@ async def update_budget(
         except ValueError as e:
             raise HTTPException(status_code=400, detail={"error": str(e)})
 
-    # recompute budget_reset_at when the duration changes, unless the caller pinned a reset time explicitly
-    recomputed_reset_at: Final = (
-        {"budget_reset_at": get_budget_reset_time(budget_duration=budget_obj.budget_duration)}
-        if budget_obj.budget_duration is not None and "budget_reset_at" not in budget_obj.model_fields_set
-        else MappingProxyType({"budget_reset_at": None})
-        if "budget_duration" in budget_obj.model_fields_set
-        and budget_obj.budget_duration is None
-        and "budget_reset_at" not in budget_obj.model_fields_set
+    updates: Final = budget_obj.model_dump(exclude_unset=True)
+    pinned_reset_at: Final = (
+        {"budget_reset_at": budget_obj.budget_reset_at}
+        if "budget_reset_at" in budget_obj.model_fields_set and "budget_reset_day" not in budget_obj.model_fields_set
         else {}
     )
 
     budget_obj_jsonified: Final[Mapping[str, object]] = jsonify_object(
         {
-            **budget_obj.model_dump(exclude_unset=True),
-            **recomputed_reset_at,
+            **updates,
+            **budget_schedule_updates(updates),
+            **pinned_reset_at,
             "updated_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
         }
     )

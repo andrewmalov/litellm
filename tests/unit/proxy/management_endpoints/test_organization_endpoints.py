@@ -1253,6 +1253,7 @@ def test_build_budget_write_data_recomputes_reset_at_on_duration():
 
     data = build_budget_write_data({"budget_duration": "30d"}, "admin-1")
     assert data["budget_duration"] == "30d"
+    assert data["budget_reset_day"] is None
     assert "budget_reset_at" in data
     assert data["updated_by"] == "admin-1"
 
@@ -1264,6 +1265,7 @@ def test_build_budget_write_data_no_reset_at_without_duration():
     data = build_budget_write_data({"tpm_limit": None}, "admin-1")
     assert data["tpm_limit"] is None
     assert "budget_reset_at" not in data
+    assert "budget_reset_day" not in data
 
 
 def test_build_budget_write_data_clears_reset_at_with_null_duration():
@@ -1273,6 +1275,7 @@ def test_build_budget_write_data_clears_reset_at_with_null_duration():
     data = build_budget_write_data({"budget_duration": None}, "admin-1")
     assert data["budget_duration"] is None
     assert data["budget_reset_at"] is None
+    assert data["budget_reset_day"] is None
 
 
 @pytest.mark.asyncio
@@ -1605,3 +1608,154 @@ async def test_membership_org_admin_cannot_remove_default_key_policy(monkeypatch
         )
     assert error.value.status_code == 403
     assert "key_budget_policy" in str(error.value.detail)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ("legacy", "v2"))
+@pytest.mark.parametrize("day", (15, None))
+async def test_organization_update_sets_or_disables_monthly_reset(
+    monkeypatch: pytest.MonkeyPatch, api: str, day: int | None
+) -> None:
+    from datetime import datetime
+    from typing import Final
+    from zoneinfo import ZoneInfo
+
+    from pydantic import TypeAdapter
+
+    prisma: Final = (
+        await _run_legacy_update_organization(
+            monkeypatch, body={"organization_id": "org-1", "budget_reset_day": day}, existing_budget_id="budget-1"
+        )
+        if api == "legacy"
+        else await _run_update_organization_v2(
+            monkeypatch, body={"budget_reset_day": day}, existing_budget_id="budget-1", existing_metadata={}
+        )
+    )
+    written: Final = prisma.db.litellm_budgettable.update.await_args.kwargs["data"]
+    assert written["budget_reset_day"] == day
+    assert written["budget_duration"] == ("1mo" if day is not None else None)
+    assert "spend" not in written
+    if day is None:
+        assert written["budget_reset_at"] is None
+        return
+    reset: Final = TypeAdapter(datetime).validate_python(written["budget_reset_at"]).astimezone(ZoneInfo("Europe/Moscow"))
+    assert (reset.day, reset.hour, reset.minute, reset.second) == (day, 0, 0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget_duration", ["30d", None])
+@pytest.mark.parametrize("day_patch", ({}, {"budget_reset_day": 15}, {"budget_reset_day": None}))
+async def test_new_organization_schedules_budget_reset_from_duration(
+    monkeypatch: pytest.MonkeyPatch, budget_duration: str | None, day_patch: Mapping[str, object]
+) -> None:
+    """/organization/new with an inline budget_duration must write budget_reset_at on the auto-created
+    budget row, the way team create and /budget/new do, or the org budget never resets and the UI
+    cannot show the current budget period."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from litellm.proxy._types import LitellmUserRoles, NewOrganizationRequest, UserAPIKeyAuth
+    from litellm.proxy.management_endpoints.organization_endpoints import new_organization
+    from litellm.proxy.utils import PrismaClient
+
+    prisma_client = MagicMock()
+    prisma_client.jsonify_object = MagicMock(side_effect=lambda data: PrismaClient.jsonify_object(prisma_client, data))
+    prisma_client.db.litellm_usertable.find_unique = AsyncMock(return_value=None)
+    prisma_client.db.litellm_budgettable.create = AsyncMock(return_value=MagicMock(budget_id="budget-1"))
+    prisma_client.db.litellm_organizationtable.create = AsyncMock(return_value={"organization_id": "org-1"})
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", prisma_client)
+    monkeypatch.setattr("litellm.proxy.proxy_server.llm_router", MagicMock())
+    monkeypatch.setattr("litellm.proxy.proxy_server.premium_user", True, raising=False)
+
+    await new_organization(
+        data=NewOrganizationRequest.model_validate(
+            {"organization_alias": "org", "max_budget": 100, "budget_duration": budget_duration, **day_patch}
+        ),
+        user_api_key_dict=UserAPIKeyAuth(user_id="admin", user_role=LitellmUserRoles.PROXY_ADMIN),
+    )
+
+    budget_write = prisma_client.db.litellm_budgettable.create.await_args.kwargs["data"]
+    if "budget_reset_day" in day_patch:
+        assert budget_write["budget_reset_day"] == day_patch["budget_reset_day"]
+        if day_patch["budget_reset_day"] is None:
+            assert budget_write["budget_duration"] is None
+            assert budget_write["budget_reset_at"] is None
+            return
+        assert budget_write["budget_duration"] == "1mo"
+        local_reset: Final = budget_write["budget_reset_at"].astimezone(ZoneInfo("Europe/Moscow"))
+        assert (local_reset.day, local_reset.hour, local_reset.minute) == (15, 0, 0)
+        return
+    if budget_duration is None:
+        assert "budget_reset_at" not in budget_write, budget_write
+        return
+    reset_at = budget_write["budget_reset_at"]
+    assert isinstance(reset_at, datetime) and reset_at.tzinfo is not None, budget_write
+    assert budget_write["budget_duration"] == budget_duration
+
+
+@pytest.mark.parametrize("day", (0, 32, -1, 15.5, True, "15"))
+def test_organization_reset_day_rejects_invalid_values(day: object) -> None:
+    from pydantic import ValidationError
+
+    from litellm.proxy._types import (
+        LiteLLM_OrganizationTableUpdate,
+        NewOrganizationRequest,
+        OrganizationUpdateRequestV2,
+    )
+
+    for request_type in (NewOrganizationRequest, LiteLLM_OrganizationTableUpdate, OrganizationUpdateRequestV2):
+        with pytest.raises(ValidationError, match="budget_reset_day"):
+            request_type.model_validate({"organization_alias": "org", "budget_reset_day": day})
+
+
+def test_legacy_organization_api_returns_validation_error_for_invalid_reset_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import FastAPI
+
+    from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
+    from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
+    from litellm.proxy.management_endpoints.organization_endpoints import router
+
+    app: Final = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[user_api_key_auth] = lambda: UserAPIKeyAuth(
+        user_id="admin", user_role=LitellmUserRoles.PROXY_ADMIN
+    )
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", object())
+    monkeypatch.setattr("litellm.proxy.proxy_server.premium_user", True)
+    response: Final = TestClient(app, raise_server_exceptions=False).patch(
+        "/organization/update", json={"organization_id": "org-1", "budget_reset_day": 0}
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["loc"][-1] == "budget_reset_day"
+
+
+def test_organization_info_response_keeps_budget_reset_at():
+    """/organization/info must return the budget row's budget_reset_at so the dashboard can show
+    which budget period the org's spend covers."""
+    from datetime import datetime, timezone
+
+    from litellm.proxy._types import LiteLLM_OrganizationTableWithMembers
+
+    reset_at = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    created_at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    response = LiteLLM_OrganizationTableWithMembers(
+        organization_id="org-1",
+        organization_alias="org",
+        budget_id="budget-1",
+        models=[],
+        created_by="admin",
+        updated_by="admin",
+        created_at=created_at,
+        updated_at=created_at,
+        litellm_budget_table={
+            "budget_id": "budget-1",
+            "max_budget": 100.0,
+            "budget_duration": "1mo",
+            "budget_reset_day": 15,
+            "budget_reset_at": reset_at,
+            "created_at": created_at,
+        },
+    )
+
+    assert response.model_dump()["litellm_budget_table"]["budget_reset_at"] == reset_at
+    assert response.model_dump()["litellm_budget_table"]["budget_reset_day"] == 15

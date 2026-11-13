@@ -247,6 +247,7 @@ def _budget_row(
         {
             "max_budget": max_budget,
             "budget_duration": budget_duration,
+            "budget_reset_day": None,
             "budget_reset_at": (now - timedelta(hours=1) if budget_reset_at is _ALREADY_EXPIRED else budget_reset_at),
             "budget_id": budget_id,
             "created_at": now - timedelta(days=30),
@@ -517,6 +518,7 @@ def test_reset_budget_all(reset_budget_job, mock_prisma_client):
         {
             "max_budget": 500.0,
             "budget_duration": "1d",
+            "budget_reset_day": None,
             "budget_reset_at": now,
             "budget_id": "test-budget-1",
         },
@@ -764,6 +766,7 @@ def test_reset_budget_resets_endusers_with_null_budget_id(reset_budget_job, mock
         {
             "max_budget": 50.0,
             "budget_duration": "1d",
+            "budget_reset_day": None,
             "budget_reset_at": now - timedelta(hours=1),
             "budget_id": default_budget_id,
             "created_at": now - timedelta(days=1),
@@ -865,6 +868,7 @@ def test_reset_budget_skips_null_budget_id_endusers_when_default_not_configured(
         {
             "max_budget": 50.0,
             "budget_duration": "1d",
+            "budget_reset_day": None,
             "budget_reset_at": now - timedelta(hours=1),
             "budget_id": "some-budget",
             "created_at": now - timedelta(days=1),
@@ -905,6 +909,7 @@ def test_reset_budget_skips_null_budget_id_endusers_when_default_not_in_reset_li
         {
             "max_budget": 50.0,
             "budget_duration": "1d",
+            "budget_reset_day": None,
             "budget_reset_at": now - timedelta(hours=1),
             "budget_id": "other-budget",
             "created_at": now - timedelta(days=1),
@@ -4544,3 +4549,29 @@ async def test_reset_budget_for_litellm_team_members_called():
     assert len(team_member_writes) == 1
     assert team_member_writes[0]["where"]["budget_id"]["in"] == ["budget1"]
     assert team_member_writes[0]["data"] == {"spend": 0}
+
+
+def test_organization_budget_reset_keeps_monthly_day_and_moscow_midnight(reset_budget_job, mock_prisma_client):
+    from zoneinfo import ZoneInfo
+
+    from litellm.models.budget import LiteLLM_BudgetTableFull
+
+    budget: Final = LiteLLM_BudgetTableFull.model_validate(
+        {
+            "budget_id": "org-budget",
+            "budget_duration": "1mo",
+            "budget_reset_day": 17,
+            "budget_reset_at": datetime(2026, 1, 16, 21, tzinfo=timezone.utc),
+            "created_at": datetime(2025, 1, 1, tzinfo=timezone.utc),
+        }
+    )
+    organization: Final = types.SimpleNamespace(organization_id="org-1", budget_id="org-budget", spend=20.0)
+    mock_prisma_client.data["budget"] = [budget]
+    mock_prisma_client.db.litellm_organizationtable.set_find_many_results([organization])
+
+    asyncio.run(reset_budget_job.reset_budget_for_litellm_budget_table())
+
+    write: Final = _batch_writes(mock_prisma_client, "budget")[0]
+    reset_at: Final = write["data"]["budget_reset_at"].astimezone(ZoneInfo("Europe/Moscow"))
+    assert (reset_at.day, reset_at.hour, reset_at.minute, reset_at.second) == (17, 0, 0, 0)
+    assert _batch_writes(mock_prisma_client, "org")[0]["data"]["spend"] == 0

@@ -167,7 +167,7 @@ docker compose build proxy
 
 Release Rust compilation needs substantially more memory than proxy runtime. An 8 GB Docker VM failed locally during compilation; prefer a native x86 builder with sufficient memory
 
-For this release, `Dockerfile.runtime` can reuse the trusted linux/amd64 runtime built at `ea57c0345c`. Dependencies, Rust, enterprise code and proxy extras remain unchanged. It copies all changed production Python modules and preserves the compiled extension and UI. For future changes, recheck the full production diff before reusing this method
+For the monthly budget release, `Dockerfile.runtime` reuses the trusted linux/amd64 exclusive-pool runtime pinned in its `BASE_IMAGE` argument. It preserves dependencies, Rust, enterprise code and the UI, copies the updated Python modules and budget migration, and regenerates Prisma from the updated schema. For future changes, recheck the full production diff before reusing this method
 
 Supply that compatible base by digest and record the source revision:
 
@@ -175,7 +175,7 @@ Supply that compatible base by digest and record the source revision:
 docker build --platform linux/amd64 -f Dockerfile.runtime \
   --build-arg BASE_IMAGE="$TRUSTED_BASE_IMAGE_DIGEST" \
   --build-arg SOURCE_REVISION="$(git -C ../.. rev-parse HEAD)" \
-  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-local-tokens-20261109 ../..
+  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-monthly-budget ../..
 ```
 
 The base must use Python 3.13 and `/app/.venv`. Do not substitute an unrelated LiteLLM release. Publish the image and transfer this directory without `.env` to another host, transferring secrets separately. Set `LITELLM_IMAGE` to the published digest, then follow first-start or migration instructions. `--no-build` leaves build options unused
@@ -183,3 +183,11 @@ The base must use Python 3.13 and `/app/.venv`. Do not substitute an unrelated L
 ## Individual key budget policies
 
 See [key-budget-policies.md](key-budget-policies.md) for administrator-owned `5h` and `7d` allowances inherited from teams and organizations
+
+## Monthly organization budgets
+
+Use `cr.selcloud.ru/ttkdc/litellm:exclusive-pool-monthly-budget-20261113` for the combined pool and monthly budget release. It includes the `exclusive_pool.configured.callback` module, the new budget schema and the Prisma client. The standalone `org-monthly-budget-d766904765` image does not contain the pool module and cannot load this deployment's callback configuration
+
+Set an organization's `budget_reset_day` through the [organization API](../../docs/organization-monthly-budget.md). Existing schedules and pool configuration are preserved. Apply the included schema migration through the normal migration service before starting proxy workers
+
+Local verification used this directory's proxy and pool configuration with isolated PostgreSQL and Redis. The proxy started and `/health/liveliness` returned HTTP 200. Budget creation, schedule changes and disabling resets succeeded through `/budget/new` and `/budget/update`; invalid days returned 422 and unauthenticated requests returned 401. Organization HTTP writes require an Enterprise license, so their behavior was verified by the organization endpoint tests

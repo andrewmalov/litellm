@@ -69,6 +69,27 @@ async def test_new_budget_success(client_and_mocks):
     mock_table.create.assert_awaited_once()
 
 
+@pytest.mark.parametrize("day", (15, None))
+def test_new_budget_honors_explicit_monthly_day_over_duration(
+    client_and_mocks: tuple[TestClient, MagicMock, MagicMock], day: int | None
+) -> None:
+    client, _, _ = client_and_mocks
+    response: Final = client.post(
+        "/budget/new", json={"budget_duration": "30d", "budget_reset_day": day}
+    )
+    assert response.status_code == 200, response.text
+    body: Final = response.json()
+    assert body["budget_reset_day"] == day
+    assert body["budget_duration"] == ("1mo" if day is not None else None)
+    if day is None:
+        assert body["budget_reset_at"] is None
+        return
+    from zoneinfo import ZoneInfo
+
+    reset: Final = datetime.fromisoformat(body["budget_reset_at"]).astimezone(ZoneInfo("Europe/Moscow"))
+    assert (reset.day, reset.hour, reset.minute) == (day, 0, 0)
+
+
 @pytest.mark.parametrize("bad_duration", ["0s", "-5m"])
 @pytest.mark.asyncio
 async def test_new_budget_rejects_a_duration_that_never_advances(

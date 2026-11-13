@@ -29,7 +29,8 @@ from typing import (
 
 import fastapi
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import ConfigDict, TypeAdapter
+from fastapi.exceptions import RequestValidationError
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 from typing_extensions import ReadOnly, TypedDict
 
 from litellm._logging import verbose_proxy_logger
@@ -43,7 +44,7 @@ from litellm.proxy.auth.auth_checks import (
 )
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
 from litellm.proxy.common_utils.auth_cache_invalidation_pubsub import evict_and_broadcast
-from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time
+from litellm.proxy.common_utils.timezone_utils import budget_schedule_updates
 from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
 from litellm.proxy.management_endpoints.budget_management_endpoints import (
     new_budget,
@@ -322,22 +323,7 @@ _ORG_METADATA_FIELDS: Final = tuple(
 
 
 def build_budget_write_data(budget_updates: Mapping[str, object], updated_by: str) -> Mapping[str, object]:
-    """
-    Budget-row columns to write. ``budget_reset_at`` tracks any sent ``budget_duration``:
-    recomputed for a new duration, cleared alongside a ``None`` duration so no stale reset
-    timestamp survives. Other sent fields (including a ``None`` clear) are written as-is.
-    """
-    budget_duration: Final = budget_updates.get("budget_duration")
-    recomputed_reset_at: Final[Mapping[str, object]] = (
-        {
-            "budget_reset_at": (
-                get_budget_reset_time(budget_duration=budget_duration) if isinstance(budget_duration, str) else None
-            )
-        }
-        if "budget_duration" in budget_updates
-        else {}
-    )
-    return {**budget_updates, **recomputed_reset_at, "updated_by": updated_by}
+    return {**budget_updates, **budget_schedule_updates(budget_updates), "updated_by": updated_by}
 
 
 def handle_nested_budget_structure_in_organization_update_request(
@@ -512,7 +498,17 @@ async def new_organization(
 
         _budget: Final = await _table(BudgetRepository(prisma_client)).create(
             data={
-                **new_budget,
+                **build_budget_write_data(
+                    {
+                        **new_budget,
+                        **(
+                            {"budget_reset_day": data.budget_reset_day}
+                            if "budget_reset_day" in data.model_fields_set
+                            else {}
+                        ),
+                    },
+                    user_api_key_dict.user_id or litellm_proxy_admin_name,
+                ),
                 "created_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
                 "updated_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
             }
@@ -738,7 +734,10 @@ async def update_organization(
     raw_data_with_flat_budget_fields: Final = handle_nested_budget_structure_in_organization_update_request(raw_data)
 
     # Create validated data model
-    data: Final = LiteLLM_OrganizationTableUpdate(**raw_data_with_flat_budget_fields)
+    try:
+        data: Final = LiteLLM_OrganizationTableUpdate.model_validate(raw_data_with_flat_budget_fields)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
 
     # Validate budget values are not negative
     if data.max_budget is not None and (not math.isfinite(data.max_budget) or data.max_budget < 0):

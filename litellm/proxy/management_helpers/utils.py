@@ -240,7 +240,7 @@ async def handle_budget_for_entity(
             return data_budget_id
         elif _budget_data:
             # Create a new budget with the provided fields
-            budget_row: Final = LiteLLM_BudgetTable(**_budget_data)
+            budget_row: Final = LiteLLM_BudgetTable.model_validate(_budget_data)
             new_budget_data: Final = prisma_client.jsonify_object(budget_row.model_dump(exclude_none=True))
 
             _budget: Final[_PrismaBudgetRecord] = await BudgetRepository(prisma_client).table.create(
@@ -261,7 +261,7 @@ async def handle_budget_for_entity(
         # If budget fields are provided, update the existing budget
         if _budget_data:
             await update_budget(
-                budget_obj=BudgetNewRequest(budget_id=existing_budget_id, **_budget_data),
+                budget_obj=BudgetNewRequest.model_validate({**_budget_data, "budget_id": existing_budget_id}),
                 user_api_key_dict=user_api_key_dict,
             )
 
