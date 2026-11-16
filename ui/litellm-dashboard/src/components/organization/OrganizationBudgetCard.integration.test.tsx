@@ -51,6 +51,7 @@ describe("organization budget for a dashboard member", () => {
     expect(screen.getByText("Месячный лимит")).toBeInTheDocument();
     expect(screen.getByText("125,50 USD")).toBeInTheDocument();
     expect(screen.getByText("874,50 USD")).toBeInTheDocument();
+    expect(screen.getByText(/Бюджет обновится:/)).toBeInTheDocument();
     expect(screen.getByText("16.12.2030, 00:00:00 МСК")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       "/organization/budget-summary",

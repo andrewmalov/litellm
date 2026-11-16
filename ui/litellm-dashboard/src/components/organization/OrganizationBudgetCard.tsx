@@ -117,7 +117,7 @@ export default function OrganizationBudgetCard({ accessToken, userId }: Props) {
             <div className="text-sm text-muted-foreground">
               {organization.budget_reset_at ? (
                 <>
-                  Следующий сброс:{" "}
+                  Бюджет обновится:{" "}
                   <time dateTime={organization.budget_reset_at}>
                     {moscowTime.format(new Date(organization.budget_reset_at))} МСК
                   </time>

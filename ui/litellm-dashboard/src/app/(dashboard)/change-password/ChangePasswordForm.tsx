@@ -3,7 +3,7 @@
 import React, { useState } from "react";
 import { CircleAlert } from "lucide-react";
 import { z } from "zod";
-import useAuthorized from "@/app/(dashboard)/hooks/useAuthorized";
+import { useAuth } from "@/contexts/AuthContext";
 import { Alert, AlertTitle } from "@/components/shared/Alert";
 import { PasswordInput } from "@/components/shared/PasswordInput";
 import { FormField } from "@/components/shared/form/FormField";
@@ -32,7 +32,7 @@ const changePasswordSchema = z
 type ChangePasswordValues = z.infer<typeof changePasswordSchema>;
 
 export function ChangePasswordForm() {
-  const { accessToken, passwordResetRequired } = useAuthorized();
+  const { accessToken, passwordResetRequired } = useAuth();
   const form = useZodForm(changePasswordSchema, {
     defaultValues: { currentPassword: "", newPassword: "", confirmNewPassword: "" },
   });
