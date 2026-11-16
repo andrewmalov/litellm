@@ -17,3 +17,5 @@ Constraints: preserve pool configuration, credentials, state, client roles, coun
 7. Drain incoming traffic and active operations, replace only proxy, run client-session positive/negative acceptance, remove temporary data via supported APIs, preserve rollback and report evidence
 
 Review focus: stale membership authorization, explicit null overrides, zero budget bypass, independent worker cache, session data leakage, policy resynchronization resetting unchanged windows
+
+Acceptance ruling: the generic budget reset helper rounds 1d to UTC midnight, which conflicts with the requested 24-hour key interval. Use a dedicated key-window reset calculation for 1d, starting at creation plus 24 hours and advancing from the prior reset anchor. Keep other durations, including legacy 5h/7d and monthly organization schedules, unchanged

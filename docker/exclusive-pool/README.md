@@ -176,7 +176,7 @@ docker build --platform linux/amd64 -f Dockerfile.runtime \
   --build-context dashboard=../../ui/litellm-dashboard/out \
   --build-arg BASE_IMAGE="$TRUSTED_BASE_IMAGE_DIGEST" \
   --build-arg SOURCE_REVISION="$(git -C ../.. rev-parse HEAD)" \
-  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-monthly-budget ../..
+  -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-daily-budget ../..
 ```
 
 The base must use Python 3.13 and `/app/.venv`. Do not substitute an unrelated LiteLLM release. Publish the image and transfer this directory without `.env` to another host, transferring secrets separately. Set `LITELLM_IMAGE` to the published digest, then follow first-start or migration instructions. `--no-build` leaves build options unused

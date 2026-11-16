@@ -1,10 +1,10 @@
 # Individual key budget policies
 
-Available in `cr.selcloud.ru/ttkdc/litellm:exclusive-pool-key-policies-20261105` for `linux/amd64`
+Available in the daily budget release for `linux/amd64`; see [organization-budget-summary.md](../../docs/organization-budget-summary.md) for the member summary API
 
 Set `metadata.key_budget_policy` on a team to apply the same individual allowances to every key on that team. Set it on an organization to supply allowances for keys without a team. Aggregate team and organization budgets remain separate
 
-Only a proxy administrator can configure or remove a policy. Policies require exactly two windows, `5h` and `7d`, with positive finite dollar amounts
+Only a proxy administrator can configure or remove a policy. Policies require exactly two windows, either `5h`/`7d` or `1d`/`7d`, with positive finite numeric dollar amounts
 
 ```bash
 curl --fail-with-body "$PROXY_URL/team/update" \
@@ -34,7 +34,7 @@ curl --fail-with-body "$PROXY_URL/key/generate" \
   -d '{"team_id": "team-a", "key_alias": "member-key"}'
 ```
 
-Each key has independent spend counters. The first exhausted window blocks that key. LiteLLM's existing wall-clock reset mechanics apply: `7d` resets on Monday at the configured budget reset time, and `5h` uses the existing hour alignment
+Each key has independent spend counters. The first exhausted window blocks that key. The `1d` window lasts 24 hours from creation, then advances from its previous reset timestamp. Existing alignment for `7d` and `5h` remains unchanged
 
 Existing keys receive policy changes before their next authenticated request, after the existing team or organization cache refreshes. Windows are persisted on the key, preserving reset timestamps and duration-based spend counters. A concurrent key update may return HTTP 409 and should be retried
 
