@@ -647,6 +647,7 @@ async def test_organization_member_add_budget_omission_and_null_leave_budget_uns
     from litellm.proxy.management_endpoints.organization_endpoints import organization_member_add
 
     user = LiteLLM_UserTable(user_id="user-1", user_role="internal_user")
+
     async def create_membership(data):
         return LiteLLM_OrganizationMembershipTable(
             user_id="user-1",
@@ -1588,22 +1589,38 @@ async def test_membership_org_admin_cannot_remove_default_key_policy(monkeypatch
 
     cache: Final = UserApiKeyCache()
     stamp: Final = datetime(2030, 1, 7, tzinfo=timezone.utc)
-    await cache.async_set_cache(key="delegated-admin", value=LiteLLM_UserTable(
-        user_id="delegated-admin", user_email="delegated@example.invalid", organization_memberships=[{
-            "user_id": "delegated-admin", "organization_id": "org-a", "user_role": "org_admin",
-            "created_at": stamp, "updated_at": stamp,
-        }],
-    ))
-    policy: Final = {"key_budget_policy": {"budget_limits": [
-        {"budget_duration": "5h", "max_budget": 10}, {"budget_duration": "7d", "max_budget": 100},
-    ]}}
+    await cache.async_set_cache(
+        key="delegated-admin",
+        value=LiteLLM_UserTable(
+            user_id="delegated-admin",
+            user_email="delegated@example.invalid",
+            organization_memberships=[
+                {
+                    "user_id": "delegated-admin",
+                    "organization_id": "org-a",
+                    "user_role": "org_admin",
+                    "created_at": stamp,
+                    "updated_at": stamp,
+                }
+            ],
+        ),
+    )
+    policy: Final = {
+        "key_budget_policy": {
+            "budget_limits": [
+                {"budget_duration": "5h", "max_budget": 10},
+                {"budget_duration": "7d", "max_budget": 100},
+            ]
+        }
+    }
     client: Final = MagicMock()
     client.db.litellm_organizationtable.find_unique = AsyncMock(return_value=SimpleNamespace(metadata=policy))
     monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", client)
     monkeypatch.setattr("litellm.proxy.proxy_server.user_api_key_cache", cache)
     with pytest.raises(HTTPException) as error:
         await update_organization_v2(
-            organization_id="org-a", data=OrganizationUpdateRequestV2.model_validate({"metadata": metadata}),
+            organization_id="org-a",
+            data=OrganizationUpdateRequestV2.model_validate({"metadata": metadata}),
             user_api_key_dict=UserAPIKeyAuth(user_id="delegated-admin", user_role="internal_user"),
         )
     assert error.value.status_code == 403
@@ -1638,7 +1655,9 @@ async def test_organization_update_sets_or_disables_monthly_reset(
     if day is None:
         assert written["budget_reset_at"] is None
         return
-    reset: Final = TypeAdapter(datetime).validate_python(written["budget_reset_at"]).astimezone(ZoneInfo("Europe/Moscow"))
+    reset: Final = (
+        TypeAdapter(datetime).validate_python(written["budget_reset_at"]).astimezone(ZoneInfo("Europe/Moscow"))
+    )
     assert (reset.day, reset.hour, reset.minute, reset.second) == (day, 0, 0, 0)
 
 
@@ -1708,7 +1727,9 @@ def test_organization_reset_day_rejects_invalid_values(day: object) -> None:
             request_type.model_validate({"organization_alias": "org", "budget_reset_day": day})
 
 
-def test_legacy_organization_api_returns_validation_error_for_invalid_reset_day(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_organization_api_returns_validation_error_for_invalid_reset_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from fastapi import FastAPI
 
     from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
@@ -1759,3 +1780,98 @@ def test_organization_info_response_keeps_budget_reset_at():
 
     assert response.model_dump()["litellm_budget_table"]["budget_reset_at"] == reset_at
     assert response.model_dump()["litellm_budget_table"]["budget_reset_day"] == 15
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("maximum,spend,remaining", [(1000, 125.5, 874.5), (None, 125.5, None), (0, 2, 0), (10, 20, 0)])
+async def test_budget_summary_is_membership_scoped_explicit_projection(monkeypatch, maximum, spend, remaining):
+    from datetime import datetime, timezone
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.proxy.management_endpoints.organization_endpoints import organization_budget_summary
+
+    reset: Final = datetime(2030, 1, 15, 21, tzinfo=timezone.utc)
+    row: Final = SimpleNamespace(
+        organization_id="member-org",
+        organization_alias="Organization",
+        spend=spend,
+        budget_id="private",
+        metadata={"secret": "private"},
+        litellm_budget_table=SimpleNamespace(
+            max_budget=maximum, budget_duration="1mo", budget_reset_day=16, budget_reset_at=reset
+        ),
+    )
+    table: Final = SimpleNamespace(find_many=AsyncMock(return_value=[row]))
+    monkeypatch.setattr(
+        "litellm.proxy.proxy_server.prisma_client", SimpleNamespace(db=SimpleNamespace(litellm_organizationtable=table))
+    )
+    result: Final = await organization_budget_summary(
+        user_api_key_dict=UserAPIKeyAuth(user_id="member", user_role="internal_user")
+    )
+    assert table.find_many.call_args.kwargs["where"] == {"members": {"some": {"user_id": "member"}}}
+    assert result.model_dump(mode="json") == {
+        "organizations": [
+            {
+                "organization_id": "member-org",
+                "organization_alias": "Organization",
+                "max_budget": maximum,
+                "spend": spend,
+                "remaining_budget": remaining,
+                "budget_duration": "1mo",
+                "budget_reset_day": 16,
+                "budget_reset_at": "2030-01-15T21:00:00Z",
+            }
+        ]
+    }
+    table.find_many.return_value = []
+    revoked: Final = await organization_budget_summary(
+        user_api_key_dict=UserAPIKeyAuth(user_id="member", user_role="internal_user")
+    )
+    assert revoked.organizations == ()
+
+
+@pytest.mark.asyncio
+async def test_budget_summary_requires_user_identity(monkeypatch):
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.proxy.management_endpoints.organization_endpoints import organization_budget_summary
+
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", SimpleNamespace())
+    with pytest.raises(HTTPException) as error:
+        await organization_budget_summary(user_api_key_dict=UserAPIKeyAuth(user_role="internal_user"))
+    assert error.value.status_code == 403
+
+
+def test_budget_summary_http_ignores_requested_identity_and_filters_by_session(monkeypatch):
+    from fastapi import FastAPI
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
+    from litellm.proxy.management_endpoints.organization_endpoints import router
+
+    table: Final = SimpleNamespace(find_many=AsyncMock(return_value=[]))
+    monkeypatch.setattr("litellm.proxy.proxy_server.premium_user", True)
+    monkeypatch.setattr(
+        "litellm.proxy.proxy_server.prisma_client", SimpleNamespace(db=SimpleNamespace(litellm_organizationtable=table))
+    )
+    app: Final = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[user_api_key_auth] = lambda: UserAPIKeyAuth(user_id="member", user_role="internal_user")
+    response: Final = TestClient(app).get("/organization/budget-summary?user_id=other&organization_id=foreign")
+    assert response.status_code == 200
+    assert response.json() == {"organizations": []}
+    assert table.find_many.call_args.kwargs["where"] == {"members": {"some": {"user_id": "member"}}}
+
+
+@pytest.mark.asyncio
+async def test_budget_summary_handles_absent_budget_schedule(monkeypatch):
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.proxy.management_endpoints.organization_endpoints import organization_budget_summary
+
+    row: Final = SimpleNamespace(organization_id="org", organization_alias=None, spend=3.0, litellm_budget_table=None)
+    table: Final = SimpleNamespace(find_many=AsyncMock(return_value=[row]))
+    monkeypatch.setattr(
+        "litellm.proxy.proxy_server.prisma_client", SimpleNamespace(db=SimpleNamespace(litellm_organizationtable=table))
+    )
+    summary: Final = await organization_budget_summary(user_api_key_dict=UserAPIKeyAuth(user_id="member"))
+    assert summary.organizations[0].max_budget is None
+    assert summary.organizations[0].remaining_budget is None
+    assert summary.organizations[0].budget_reset_at is None
+    assert summary.organizations[0].budget_duration is None

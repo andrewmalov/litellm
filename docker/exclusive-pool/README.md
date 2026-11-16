@@ -167,12 +167,13 @@ docker compose build proxy
 
 Release Rust compilation needs substantially more memory than proxy runtime. An 8 GB Docker VM failed locally during compilation; prefer a native x86 builder with sufficient memory
 
-For the monthly budget release, `Dockerfile.runtime` reuses the trusted linux/amd64 exclusive-pool runtime pinned in its `BASE_IMAGE` argument. It preserves dependencies, Rust, enterprise code and the UI, copies the updated Python modules and budget migration, and regenerates Prisma from the updated schema. For future changes, recheck the full production diff before reusing this method
+For the daily key budget release, `Dockerfile.runtime` reuses the trusted linux/amd64 exclusive-pool runtime pinned in its `BASE_IMAGE` argument. It preserves dependencies, Rust and enterprise code, copies the updated Python modules and budget migration, regenerates Prisma from the updated schema and installs a freshly built dashboard from the named `dashboard` build context. For future changes, recheck the full production diff before reusing this method
 
-Supply that compatible base by digest and record the source revision:
+Build `ui/litellm-dashboard` with `npm run build` first. Supply the compatible base by digest and record the source revision:
 
 ```bash
 docker build --platform linux/amd64 -f Dockerfile.runtime \
+  --build-context dashboard=../../ui/litellm-dashboard/out \
   --build-arg BASE_IMAGE="$TRUSTED_BASE_IMAGE_DIGEST" \
   --build-arg SOURCE_REVISION="$(git -C ../.. rev-parse HEAD)" \
   -t cr.selcloud.ru/ttkdc/litellm:exclusive-pool-monthly-budget ../..
@@ -182,7 +183,7 @@ The base must use Python 3.13 and `/app/.venv`. Do not substitute an unrelated L
 
 ## Individual key budget policies
 
-See [key-budget-policies.md](key-budget-policies.md) for administrator-owned `5h` and `7d` allowances inherited from teams and organizations
+See [key-budget-policies.md](key-budget-policies.md) for administrator-owned `5h`/`7d` or `1d`/`7d` allowances inherited from teams and organizations
 
 ## Monthly organization budgets
 

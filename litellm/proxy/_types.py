@@ -683,6 +683,7 @@ class LiteLLMRoutes(enum.Enum):
         "/team/list",
         "/v2/team/list",
         "/organization/list",
+        "/organization/budget-summary",
         "/team/available",
         "/team/metadata_schema",
         "/user/info",
@@ -744,6 +745,7 @@ class LiteLLMRoutes(enum.Enum):
 
     management_routes = (
         [
+            "/organization/budget-summary",
             # user
             "/user/new",
             "/management/v1/users/bulk",
@@ -949,6 +951,7 @@ class LiteLLMRoutes(enum.Enum):
     )
 
     self_managed_routes = [
+        "/organization/budget-summary",
         # update_team resolves proxy/org/team admin itself and filters team admins
         # through the team_admin_editable_team_fields setting
         "/team/update",

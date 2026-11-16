@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-ARG BASE_IMAGE=cr.selcloud.ru/ttkdc/litellm@sha256:3c69d855a2708655390add8f8392341a43dc4228a1c9e7ca10723dff43c8cf56
+ARG BASE_IMAGE=cr.selcloud.ru/ttkdc/litellm@sha256:a6ecd7cdbd4dcbfaf1aaae23199922021501a4ae42644f58d03de383114308a9
 FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 
-ARG LITELLM_RELEASE_TAG=exclusive-pool-monthly-budget
+ARG LITELLM_RELEASE_TAG=exclusive-pool-daily-budget
 ARG SOURCE_REVISION=development
 ENV LITELLM_RELEASE_TAG=${LITELLM_RELEASE_TAG}
 LABEL org.opencontainers.image.revision=${SOURCE_REVISION}
@@ -32,3 +32,6 @@ COPY litellm-proxy-extras/litellm_proxy_extras/migrations/20261111150000_add_bud
 COPY litellm-proxy-extras/litellm_proxy_extras/migrations/20261111150000_add_budget_reset_day/ /app/.venv/lib/python3.13/site-packages/litellm_proxy_extras/migrations/20261111150000_add_budget_reset_day/
 RUN prisma generate --schema=/app/schema.prisma && \
     python -c "from litellm.router_utils.exclusive_pool.callback import ExclusiveEndpointPool; from prisma.models import LiteLLM_BudgetTable; assert 'budget_reset_day' in LiteLLM_BudgetTable.model_fields"
+
+RUN rm -rf /app/.venv/lib/python3.13/site-packages/litellm/proxy/_experimental/out
+COPY --from=dashboard / /app/.venv/lib/python3.13/site-packages/litellm/proxy/_experimental/out/

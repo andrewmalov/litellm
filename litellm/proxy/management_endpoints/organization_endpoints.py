@@ -30,7 +30,7 @@ from typing import (
 import fastapi
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
-from pydantic import ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from typing_extensions import ReadOnly, TypedDict
 
 from litellm._logging import verbose_proxy_logger
@@ -1110,6 +1110,61 @@ async def _delete_organization_keys(
         proxy_logging_obj=proxy_logging_obj,
     )
     await evict_and_broadcast(cache_keys=jwt_mapping_cache_keys, user_api_key_cache=user_api_key_cache)
+
+
+class OrganizationBudgetSummary(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    organization_id: str
+    organization_alias: str | None
+    max_budget: float | None
+    spend: float
+    remaining_budget: float | None
+    budget_duration: str | None
+    budget_reset_day: int | None
+    budget_reset_at: datetime | None
+
+
+class OrganizationBudgetSummaryResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    organizations: tuple[OrganizationBudgetSummary, ...]
+
+
+def _organization_budget_summary(row: "PrismaOrganizationTable") -> OrganizationBudgetSummary:
+    budget: Final = row.litellm_budget_table
+    maximum: Final = budget.max_budget if budget is not None else None
+    return OrganizationBudgetSummary(
+        organization_id=row.organization_id,
+        organization_alias=row.organization_alias,
+        max_budget=maximum,
+        spend=row.spend,
+        remaining_budget=max(0.0, maximum - row.spend) if maximum is not None else None,
+        budget_duration=budget.budget_duration if budget is not None else None,
+        budget_reset_day=budget.budget_reset_day if budget is not None else None,
+        budget_reset_at=budget.budget_reset_at if budget is not None else None,
+    )
+
+
+@router.get(
+    "/organization/budget-summary",
+    tags=["organization management"],
+    response_model=OrganizationBudgetSummaryResponse,
+)
+async def organization_budget_summary(
+    user_api_key_dict: Annotated[UserAPIKeyAuth, Depends(user_api_key_auth)],
+) -> OrganizationBudgetSummaryResponse:
+    from litellm.proxy.proxy_server import prisma_client
+
+    if prisma_client is None:
+        raise HTTPException(status_code=500, detail="No db connected")
+    if not user_api_key_dict.user_id:
+        raise HTTPException(status_code=403, detail="A user identity is required")
+    rows: Final = await _table(OrganizationRepository(prisma_client)).find_many(
+        where={"members": {"some": {"user_id": user_api_key_dict.user_id}}},
+        include={"litellm_budget_table": True},
+    )
+    return OrganizationBudgetSummaryResponse(organizations=tuple(_organization_budget_summary(row) for row in rows))
 
 
 @router.get(

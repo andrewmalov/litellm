@@ -20,8 +20,8 @@ from litellm.proxy._types import (
 class KeyBudgetWindow(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    budget_duration: Literal["5h", "7d"]
-    max_budget: float = Field(gt=0, allow_inf_nan=False)
+    budget_duration: Literal["5h", "1d", "7d"]
+    max_budget: float = Field(gt=0, allow_inf_nan=False, strict=True)
 
 
 class KeyBudgetPolicy(BaseModel):
@@ -31,8 +31,11 @@ class KeyBudgetPolicy(BaseModel):
 
     @model_validator(mode="after")
     def unique_durations(self) -> Self:
-        if frozenset(w.budget_duration for w in self.budget_limits) != frozenset({"5h", "7d"}):
-            raise ValueError("key_budget_policy requires one 5h and one 7d window")
+        if frozenset(w.budget_duration for w in self.budget_limits) not in (
+            frozenset({"5h", "7d"}),
+            frozenset({"1d", "7d"}),
+        ):
+            raise ValueError("key_budget_policy requires one 5h or 1d window and one 7d window")
         return self
 
 
@@ -88,7 +91,9 @@ def _parse_policy(value: object) -> KeyBudgetPolicy | None:
     try:
         return KeyBudgetPolicy.model_validate(value)
     except ValidationError:
-        raise HTTPException(400, "key_budget_policy requires positive finite budgets for exactly 5h and 7d") from None
+        raise HTTPException(
+            400, "key_budget_policy requires positive finite budgets for one 5h or 1d window and one 7d window"
+        ) from None
 
 
 def enforce_policy_authority(

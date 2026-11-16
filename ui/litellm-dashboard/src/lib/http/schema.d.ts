@@ -11828,6 +11828,23 @@ export interface paths {
         patch: operations["openrouter_proxy_route_openrouter__endpoint__patch"];
         trace?: never;
     };
+    "/organization/budget-summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Organization Budget Summary */
+        get: operations["organization_budget_summary_organization_budget_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/organization/daily/activity": {
         parameters: {
             query?: never;
@@ -40849,6 +40866,30 @@ export interface components {
             /** Updated Users */
             updated_users: components["schemas"]["LiteLLM_UserTable"][];
         };
+        /** OrganizationBudgetSummary */
+        OrganizationBudgetSummary: {
+            /** Budget Duration */
+            budget_duration: string | null;
+            /** Budget Reset At */
+            budget_reset_at: string | null;
+            /** Budget Reset Day */
+            budget_reset_day: number | null;
+            /** Max Budget */
+            max_budget: number | null;
+            /** Organization Alias */
+            organization_alias: string | null;
+            /** Organization Id */
+            organization_id: string;
+            /** Remaining Budget */
+            remaining_budget: number | null;
+            /** Spend */
+            spend: number;
+        };
+        /** OrganizationBudgetSummaryResponse */
+        OrganizationBudgetSummaryResponse: {
+            /** Organizations */
+            organizations: components["schemas"]["OrganizationBudgetSummary"][];
+        };
         /** OrganizationMemberAddRequest */
         OrganizationMemberAddRequest: {
             /** Max Budget In Organization */
@@ -69047,6 +69088,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    organization_budget_summary_organization_budget_summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationBudgetSummaryResponse"];
                 };
             };
         };
