@@ -113,8 +113,10 @@ def test_unchanged_policy_can_be_resent_by_org_admin():
 
     with pytest.raises(HTTPException) as error:
         enforce_policy_authority(
-            requested_metadata=_metadata(20), existing_metadata=_metadata(),
-            metadata_present=True, role=LitellmUserRoles.ORG_ADMIN,
+            requested_metadata=_metadata(20),
+            existing_metadata=_metadata(),
+            metadata_present=True,
+            role=LitellmUserRoles.ORG_ADMIN,
         )
     assert error.value.status_code == 403
 
@@ -266,3 +268,116 @@ def test_policy_keys_reject_delegated_automatic_rotation(
             managed=True,
         )
     assert error.value.status_code == 403
+
+
+@pytest.mark.parametrize("short", ["5h", "1d"])
+@pytest.mark.parametrize("limit", [30, 150, 300])
+def test_daily_and_legacy_policy_inherit_both_limits(short: str, limit: int):
+    reset: Final = datetime(2030, 1, 7, tzinfo=timezone.utc)
+    metadata: Final = {
+        "key_budget_policy": {
+            "budget_limits": [
+                {"budget_duration": short, "max_budget": limit},
+                {"budget_duration": "7d", "max_budget": limit * 5},
+            ]
+        }
+    }
+    windows: Final = inherited_budget_windows(
+        team_id="team-a",
+        team_metadata=metadata,
+        organization_metadata=None,
+        existing_windows=[{"budget_duration": "7d", "max_budget": 1, "reset_at": reset}],
+        next_reset=lambda duration: datetime(2030, 1, 8, tzinfo=timezone.utc),
+    )
+    assert windows is not None
+    assert tuple((w.budget_duration, w.max_budget) for w in windows) == ((short, limit), ("7d", limit * 5))
+    assert windows[1].reset_at == reset
+
+
+@pytest.mark.parametrize("durations", [("1d", "1d"), ("7d", "7d"), ("5h", "1d"), ("1d", "30d"), ("5h", "1d", "7d")])
+def test_policy_rejects_invalid_window_combinations(durations: tuple[str, ...]):
+    with pytest.raises(HTTPException) as error:
+        enforce_policy_authority(
+            requested_metadata={
+                "key_budget_policy": {
+                    "budget_limits": [{"budget_duration": duration, "max_budget": 30} for duration in durations]
+                }
+            },
+            existing_metadata=None,
+            metadata_present=True,
+            role=LitellmUserRoles.PROXY_ADMIN,
+        )
+    assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize("limit", [0, -1, "30", "invalid", True, float("nan"), float("inf"), float("-inf")])
+def test_daily_policy_rejects_nonpositive_or_nonnumeric_budget(limit: object):
+    with pytest.raises(HTTPException) as error:
+        enforce_policy_authority(
+            requested_metadata={
+                "key_budget_policy": {
+                    "budget_limits": [
+                        {"budget_duration": "1d", "max_budget": limit},
+                        {"budget_duration": "7d", "max_budget": 150},
+                    ]
+                }
+            },
+            existing_metadata=None,
+            metadata_present=True,
+            role=LitellmUserRoles.PROXY_ADMIN,
+        )
+    assert error.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_daily_policy_sync_preserves_fresh_resets_and_only_updates_definitions_across_workers() -> None:
+    cached_reset: Final = datetime(2030, 1, 7, tzinfo=timezone.utc)
+    daily_reset: Final = datetime(2030, 1, 8, tzinfo=timezone.utc)
+    weekly_reset: Final = datetime(2030, 1, 14, tzinfo=timezone.utc)
+    metadata: Final = {
+        "key_budget_policy": {
+            "budget_limits": [
+                {"budget_duration": "1d", "max_budget": 30},
+                {"budget_duration": "7d", "max_budget": 150},
+            ]
+        }
+    }
+    stored: Final = (
+        {"budget_duration": "1d", "max_budget": 10, "reset_at": daily_reset.isoformat()},
+        {"budget_duration": "7d", "max_budget": 100, "reset_at": weekly_reset.isoformat()},
+    )
+    desired: Final = (
+        {"budget_duration": "1d", "max_budget": 30.0, "reset_at": daily_reset.isoformat().replace("+00:00", "Z")},
+        {"budget_duration": "7d", "max_budget": 150.0, "reset_at": weekly_reset.isoformat().replace("+00:00", "Z")},
+    )
+    row: Final = {
+        "token": "shared-key",
+        "team_id": "team-a",
+        "organization_id": "org-a",
+        "spend": 72.5,
+        "budget_limits": json.dumps(stored),
+        "updated_at": cached_reset,
+    }
+    table: Final = SimpleNamespace(
+        find_unique=AsyncMock(side_effect=(row, {**row, "budget_limits": json.dumps(desired)})),
+        update_many=AsyncMock(return_value=1),
+    )
+    stale_windows: Final = tuple({**window, "reset_at": cached_reset} for window in stored)
+    for _worker in range(2):
+        effective: Final = await synchronize_inherited_key_windows(
+            token="shared-key",
+            team_id="team-a",
+            org_id="org-a",
+            team_metadata=metadata,
+            organization_metadata=None,
+            existing_windows=stale_windows,
+            table=table,
+            next_reset=lambda duration: cached_reset,
+        )
+        assert effective is not None
+        assert tuple(window.reset_at for window in effective) == (daily_reset, weekly_reset)
+        assert tuple(window.max_budget for window in effective) == (30, 150)
+    table.update_many.assert_awaited_once_with(
+        where={"token": "shared-key", "team_id": "team-a", "organization_id": "org-a", "updated_at": cached_reset},
+        data={"budget_limits": json.dumps(desired)},
+    )
