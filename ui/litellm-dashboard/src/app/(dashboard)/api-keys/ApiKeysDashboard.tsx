@@ -1,5 +1,6 @@
 "use client";
 
+import OrganizationBudgetCard from "@/components/organization/OrganizationBudgetCard";
 import { Page } from "@/components/shared/Page";
 import { teamListCall as v2TeamListCall } from "@/app/(dashboard)/hooks/teams/useTeams";
 import useAuthorized from "@/app/(dashboard)/hooks/useAuthorized";
@@ -65,6 +66,7 @@ export default function ApiKeysDashboard() {
 
   return (
     <Page className="h-full">
+      <OrganizationBudgetCard accessToken={accessToken} userId={userID} />
       <VirtualKeysTable
         headerActions={
           isViewOnly ? undefined : (
