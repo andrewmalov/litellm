@@ -21356,3 +21356,64 @@ async def test_default_team_policy_rejects_explicit_key_budget_override(monkeypa
         )
     assert error.value.status_code == 403
     assert "inherit" in str(error.value.detail)
+
+
+def test_effective_generated_key_daily_window_is_24_hours_from_creation() -> None:
+    now: Final = datetime(2030, 1, 10, 17, 40, 30, tzinfo=timezone.utc)
+    effective: Final = _effective_key_for_generate(
+        data=GenerateKeyRequest(budget_limits=[{"budget_duration": "1d", "max_budget": 30}]),
+        now=now,
+    )
+    assert effective.budget_limits is not None
+    assert datetime.fromisoformat(effective.budget_limits[0]["reset_at"]) == now + timedelta(days=1)
+
+
+@pytest.mark.asyncio
+async def test_generate_key_storage_preserves_inherited_daily_and_weekly_reset_times() -> None:
+    daily_reset: Final = datetime(2030, 1, 11, 17, 40, 30, tzinfo=timezone.utc)
+    weekly_reset: Final = datetime(2030, 1, 14, 3, 0, tzinfo=timezone.utc)
+    storage: Final = MagicMock()
+    storage.jsonify_object = lambda data: data
+    storage.db.litellm_objectpermissiontable.create = AsyncMock(return_value=SimpleNamespace(object_permission_id=None))
+    storage.insert_data = AsyncMock(
+        return_value=SimpleNamespace(
+            token="hashed-key",
+            models=[],
+            spend=0,
+            litellm_budget_table=None,
+            object_permission=None,
+            created_at=None,
+            updated_at=None,
+        )
+    )
+    windows: Final = [
+        {"budget_duration": "1d", "max_budget": 30, "reset_at": daily_reset.isoformat()},
+        {"budget_duration": "7d", "max_budget": 150, "reset_at": weekly_reset.isoformat()},
+    ]
+    with patch("litellm.proxy.proxy_server.prisma_client", storage):
+        await generate_key_helper_fn(
+            request_type="key", table_name="key", user_id="daily-member", budget_limits=windows
+        )
+    writes: Final = tuple(
+        call.kwargs["data"] for call in storage.insert_data.await_args_list if call.kwargs["table_name"] == "key"
+    )
+    assert len(writes) == 1
+    persisted: Final = json.loads(writes[0]["budget_limits"])
+    assert tuple(datetime.fromisoformat(window["reset_at"]) for window in persisted) == (daily_reset, weekly_reset)
+    assert tuple(window["max_budget"] for window in persisted) == (30, 150)
+
+
+@pytest.mark.asyncio
+async def test_updated_key_windows_preserve_explicit_inherited_reset_times() -> None:
+    reset: Final = datetime(2030, 1, 11, 17, 40, 30, tzinfo=timezone.utc)
+    result: Final = await prepare_key_update_data(
+        data=UpdateKeyRequest(
+            key="hashed-key",
+            budget_limits=[
+                {"budget_duration": "1d", "max_budget": 30, "reset_at": reset},
+            ],
+        ),
+        existing_key_row=LiteLLM_VerificationToken(token="hashed-key"),
+    )
+    windows: Final = json.loads(result["budget_limits"])
+    assert datetime.fromisoformat(windows[0]["reset_at"]) == reset

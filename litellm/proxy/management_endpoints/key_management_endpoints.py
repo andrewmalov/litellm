@@ -84,7 +84,7 @@ from litellm.proxy.common_utils.config_sync_pubsub import (
     publish_config_change,
 )
 from litellm.proxy.common_utils.rbac_utils import check_org_admin_can_generate_keys
-from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time
+from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time, get_key_budget_window_reset_time
 from litellm.proxy.common_utils.user_api_key_cache import AUTH_OBJECTS_TARGET, UserApiKeyCache
 from litellm.proxy.hooks.key_management_event_hooks import KeyManagementEventHooks
 from litellm.proxy.hooks.model_max_budget_limiter import build_model_max_budget_usage
@@ -126,6 +126,7 @@ from litellm.proxy.management_helpers.key_budget_policy import (
     enforce_key_budget_authority,
     inherited_budget_windows,
     key_organization_id,
+    key_window_entries,
     policy_metadata,
     requests_key_budget_change,
     stored_key_window_entries,
@@ -424,6 +425,8 @@ def _update_policy_request(
 
 def _generate_budget_windows(
     budget_limits: Sequence[BudgetLimitEntry] | None,
+    *,
+    now: datetime | None = None,
 ) -> tuple[Mapping[str, object], ...] | None:
     if not budget_limits:
         return None
@@ -431,7 +434,9 @@ def _generate_budget_windows(
         MappingProxyType(
             {
                 **window.model_dump(),
-                "reset_at": get_budget_reset_time(budget_duration=window.budget_duration).isoformat(),
+                "reset_at": (
+                    window.reset_at or get_key_budget_window_reset_time(window.budget_duration, now=now)
+                ).isoformat(),
             }
         )
         for window in budget_limits
@@ -468,7 +473,7 @@ def _effective_key_for_generate(data: GenerateKeyRequest, now: datetime) -> Lite
                 "expires": expires,
                 "budget_reset_at": budget_reset_at,
                 "key_rotation_at": key_rotation_at,
-                "budget_limits": _generate_budget_windows(data.budget_limits),
+                "budget_limits": _generate_budget_windows(data.budget_limits, now=now),
                 "object_permission": None,
             }
         )
@@ -1257,7 +1262,7 @@ async def _enforce_managed_key_edit(
             team_metadata=policy_metadata(team),
             organization_metadata=policy_metadata(organization),
             existing_windows=None,
-            next_reset=get_budget_reset_time,
+            next_reset=get_key_budget_window_reset_time,
         )
         is not None
     )
@@ -1521,7 +1526,7 @@ async def _common_key_generation_helper(
         team_metadata=policy_metadata(effective_team),
         organization_metadata=policy_metadata(org_table),
         existing_windows=None,
-        next_reset=get_budget_reset_time,
+        next_reset=get_key_budget_window_reset_time,
     )
     if inherited_windows is not None:
         enforce_key_budget_authority(
@@ -2689,14 +2694,8 @@ async def prepare_key_update_data(
     if "budget_limits" in non_default_values:
         raw_windows: Final = non_default_values["budget_limits"]
         if raw_windows:
-            from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time
-
-            initialized_windows: Final = []
-            for window in raw_windows:
-                w = window if isinstance(window, dict) else window.model_dump()
-                w["reset_at"] = get_budget_reset_time(budget_duration=w["budget_duration"]).isoformat()
-                initialized_windows.append(w)
-            non_default_values["budget_limits"] = json.dumps(initialized_windows)
+            initialized_windows: Final = _generate_budget_windows(key_window_entries(raw_windows))
+            non_default_values["budget_limits"] = json.dumps(tuple(dict(window) for window in initialized_windows or ()))
         else:
             # [] / None clears the field; prisma-client-py has no DbNull
             # sentinel for Json? columns, so store the JSON literal null
@@ -4838,12 +4837,8 @@ async def generate_key_helper_fn(
     # Initialize reset_at for each budget window
     budget_limits_json: str | None = None
     if budget_limits:
-        initialized_windows: Final = []
-        for window in budget_limits:
-            w = dict(window) if not isinstance(window, dict) else {**window}
-            w["reset_at"] = get_budget_reset_time(budget_duration=w["budget_duration"]).isoformat()
-            initialized_windows.append(w)
-        budget_limits_json = json.dumps(initialized_windows)
+        initialized_windows: Final = _generate_budget_windows(key_window_entries(budget_limits))
+        budget_limits_json = json.dumps(tuple(dict(window) for window in initialized_windows or ()))
 
     aliases_json: Final = json.dumps(aliases)
     config_json: Final = json.dumps(config)

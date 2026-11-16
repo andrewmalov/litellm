@@ -144,7 +144,7 @@ from litellm.proxy.common_utils.realtime_utils import (  # noqa: F401  # legacy 
     _realtime_request_body,  # pyright: ignore[reportPrivateUsage,reportUnusedImport]  # backwards-compatible package export
     realtime_request_body,
 )
-from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time
+from litellm.proxy.common_utils.timezone_utils import get_key_budget_window_reset_time
 from litellm.proxy.common_utils.user_api_key_cache import (
     UserApiKeyCache,
     end_user_cache_key,
@@ -2810,7 +2810,7 @@ async def _inherit_key_budget_windows(
         team_metadata=policy_metadata(team),
         organization_metadata=organization_metadata,
         existing_windows=stored_key_window_entries(token),
-        next_reset=get_budget_reset_time,
+        next_reset=get_key_budget_window_reset_time,
     )
     if preview is None or preview == stored_key_window_entries(token):
         return
@@ -2822,7 +2822,7 @@ async def _inherit_key_budget_windows(
         organization_metadata=organization_metadata,
         existing_windows=stored_key_window_entries(token),
         table=VerificationTokenRepository(prisma_client).table,
-        next_reset=get_budget_reset_time,
+        next_reset=get_key_budget_window_reset_time,
     )
     if windows is None or windows == stored_key_window_entries(token):
         return

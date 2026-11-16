@@ -1,6 +1,6 @@
 from calendar import monthrange
 from collections.abc import Mapping
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Final
 from zoneinfo import ZoneInfo
 
@@ -106,6 +106,31 @@ def get_budget_reset_time(budget_duration: str, *, budget_reset_day: int | None 
     `BudgetResetSettings` by injection (creation/update endpoints, startup backfill).
     """
     return compute_budget_reset_at(budget_duration, get_budget_reset_settings(), budget_reset_day=budget_reset_day)
+
+
+def get_key_budget_window_reset_time(
+    budget_duration: str,
+    *,
+    now: datetime | None = None,
+    previous_reset: datetime | None = None,
+) -> datetime:
+    if budget_duration != "1d":
+        return compute_budget_reset_at(budget_duration, get_budget_reset_settings(), now=now)
+    current: Final = now if now is not None else datetime.now(timezone.utc)
+    current_utc: Final = (
+        current.replace(tzinfo=timezone.utc) if current.tzinfo is None else current.astimezone(timezone.utc)
+    )
+    day: Final = timedelta(days=1)
+    if previous_reset is None:
+        return current_utc + day
+    anchor: Final = (
+        previous_reset.replace(tzinfo=timezone.utc)
+        if previous_reset.tzinfo is None
+        else previous_reset.astimezone(timezone.utc)
+    )
+    if anchor > current_utc:
+        return anchor
+    return anchor + ((current_utc - anchor) // day + 1) * day
 
 
 def budget_schedule_updates(updates: Mapping[str, object]) -> Mapping[str, object]:

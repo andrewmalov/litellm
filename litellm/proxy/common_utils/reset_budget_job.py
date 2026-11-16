@@ -36,6 +36,7 @@ from litellm.proxy.common_utils.timezone_utils import (
     BudgetResetSettings,
     compute_budget_reset_at,
     get_budget_reset_settings,
+    get_key_budget_window_reset_time,
 )
 from litellm.proxy.common_utils.user_api_key_cache import (
     AUTH_OBJECTS_TARGET,
@@ -1413,7 +1414,10 @@ class ResetBudgetJob:
         reset_at_str: Final = window.get("reset_at")
         if not reset_at_str:
             return False
-        reset_at: Final = datetime.fromisoformat(reset_at_str.replace("Z", "+00:00")).replace(tzinfo=None)
+        parsed_reset: Final = datetime.fromisoformat(reset_at_str.replace("Z", "+00:00"))
+        reset_at: Final = (
+            parsed_reset.astimezone(timezone.utc).replace(tzinfo=None) if parsed_reset.tzinfo is not None else parsed_reset
+        )
         if reset_at > now:
             return False
         new_value: Final = await ResetBudgetJob._window_carried_spend(window, counter_key, spend_counter_cache)
@@ -1424,7 +1428,13 @@ class ResetBudgetJob:
             except Exception as redis_err:
                 verbose_proxy_logger.warning("Failed to reset Redis counter %s: %s", counter_key, redis_err)
         budget_duration: Final = window["budget_duration"]
-        next_reset_at: Final = compute_budget_reset_at(budget_duration=budget_duration, settings=reset_settings)
+        next_reset_at: Final = (
+            get_key_budget_window_reset_time(budget_duration, now=now, previous_reset=reset_at)
+            if entity_type == Litellm_EntityType.KEY and budget_duration == "1d"
+            else compute_budget_reset_at(
+                budget_duration=budget_duration, settings=reset_settings, now=now.replace(tzinfo=timezone.utc)
+            )
+        )
         window["reset_at"] = next_reset_at.isoformat()
         await ResetBudgetJob._roll_window_spend_row(
             prisma_client=prisma_client,

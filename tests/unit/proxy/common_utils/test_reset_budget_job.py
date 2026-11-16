@@ -4575,3 +4575,39 @@ def test_organization_budget_reset_keeps_monthly_day_and_moscow_midnight(reset_b
     reset_at: Final = write["data"]["budget_reset_at"].astimezone(ZoneInfo("Europe/Moscow"))
     assert (reset_at.day, reset_at.hour, reset_at.minute, reset_at.second) == (17, 0, 0, 0)
     assert _batch_writes(mock_prisma_client, "org")[0]["data"]["spend"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entity", ["key", "team"])
+@pytest.mark.parametrize("expired_at", ["2030-01-07T15:22:00+00:00", "2030-01-07T18:22:00+03:00"])
+async def test_daily_window_scheduler_keeps_key_interval_anchor_and_team_calendar(entity: str, expired_at: str) -> None:
+    from litellm.caching.dual_cache import DualCache
+    from litellm.proxy._types import Litellm_EntityType
+    from litellm.proxy.common_utils.timezone_utils import compute_budget_reset_at
+
+    now: Final = datetime(2030, 1, 10, 17, 40, 30)
+    settings: Final = BudgetResetSettings()
+    expired: Final = {"budget_duration": "1d", "reset_at": expired_at}
+    storage: Final = MagicMock()
+    storage.db.execute_raw = AsyncMock(return_value=1)
+    reset: Final = await ResetBudgetJob._reset_expired_window(
+        window=expired,
+        counter_key=f"spend:{entity}:test:window:1d",
+        spend_counter_cache=DualCache(),
+        now=now,
+        reset_settings=settings,
+        prisma_client=storage,
+        entity_type=Litellm_EntityType.KEY if entity == "key" else Litellm_EntityType.TEAM,
+        entity_id="test",
+    )
+    expected: Final = (
+        datetime(2030, 1, 11, 15, 22, tzinfo=timezone.utc)
+        if entity == "key"
+        else compute_budget_reset_at(
+            "1d",
+            settings,
+            now=now.replace(tzinfo=timezone.utc),
+        )
+    )
+    assert reset
+    assert datetime.fromisoformat(expired["reset_at"]) == expected

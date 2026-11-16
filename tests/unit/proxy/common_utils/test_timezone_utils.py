@@ -199,3 +199,35 @@ def test_get_budget_reset_time_honors_global_budget_reset_time():
     finally:
         _restore_attr(litellm, "timezone", orig_tz)
         _restore_attr(litellm, "budget_reset_time", orig_rt)
+
+
+@pytest.mark.parametrize(
+    ("previous", "expected"),
+    (
+        (None, "2030-01-11T17:40:30+00:00"),
+        ("2030-01-07T15:22:00+00:00", "2030-01-11T15:22:00+00:00"),
+        ("2030-01-10T17:40:30+00:00", "2030-01-11T17:40:30+00:00"),
+        ("2030-01-11T15:22:00+00:00", "2030-01-11T15:22:00+00:00"),
+    ),
+)
+def test_key_daily_window_uses_full_days_and_preserves_its_anchor(previous: str | None, expected: str) -> None:
+    from litellm.proxy.common_utils.timezone_utils import get_key_budget_window_reset_time
+
+    actual: Final = get_key_budget_window_reset_time(
+        "1d",
+        now=datetime(2030, 1, 10, 17, 40, 30, tzinfo=timezone.utc),
+        previous_reset=datetime.fromisoformat(previous) if previous is not None else None,
+    )
+    assert actual == datetime.fromisoformat(expected)
+
+
+@pytest.mark.parametrize("duration", ["5h", "7d", "1mo"])
+def test_key_other_windows_keep_standardized_reset_semantics(duration: str) -> None:
+    from litellm.proxy.common_utils.timezone_utils import get_key_budget_window_reset_time
+
+    now: Final = datetime(2030, 1, 10, 17, 40, 30, tzinfo=timezone.utc)
+    assert get_key_budget_window_reset_time(duration, now=now) == compute_budget_reset_at(
+        duration,
+        get_budget_reset_settings(),
+        now=now,
+    )
