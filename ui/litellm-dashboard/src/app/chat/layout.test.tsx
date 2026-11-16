@@ -7,6 +7,8 @@ const { mockUseAuthorized, mockUseUISettings, mockReplace, mockUiHref, state } =
   const state = {
     enableChatUI: false,
     isUISettingsLoading: false,
+    authLoading: false,
+    passwordResetRequired: false,
   };
   return {
     state,
@@ -29,6 +31,9 @@ const { mockUseAuthorized, mockUseUISettings, mockReplace, mockUiHref, state } =
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: mockReplace }),
 }));
+vi.mock("@/contexts/AuthContext", () => ({
+  useAuth: () => ({ authLoading: state.authLoading, passwordResetRequired: state.passwordResetRequired }),
+}));
 vi.mock("@/app/(dashboard)/hooks/useAuthorized", () => ({ default: mockUseAuthorized }));
 vi.mock("@/app/(dashboard)/hooks/uiSettings/useUISettings", () => ({ useUISettings: mockUseUISettings }));
 vi.mock("@/utils/uiHref", () => ({ uiHref: mockUiHref }));
@@ -47,8 +52,39 @@ describe("ChatLayout", () => {
   afterEach(() => {
     state.enableChatUI = false;
     state.isUISettingsLoading = false;
+    state.authLoading = false;
+    state.passwordResetRequired = false;
+    mockUseUISettings.mockClear();
     mockReplace.mockClear();
     mockUiHref.mockClear();
+  });
+
+  it("redirects a forced reset before mounting protected content or loading chat settings", () => {
+    state.enableChatUI = true;
+    state.passwordResetRequired = true;
+    render(
+      <ChatLayout>
+        <div data-testid="page-content" />
+      </ChatLayout>,
+    );
+    expect(mockReplace).toHaveBeenCalledWith("/mocked-ui/change-password");
+    expect(screen.queryByTestId("page-content")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("navbar")).not.toBeInTheDocument();
+    expect(mockUseUISettings).not.toHaveBeenCalled();
+  });
+
+  it("waits for auth claims before loading chat settings or redirecting", () => {
+    state.enableChatUI = true;
+    state.authLoading = true;
+    state.passwordResetRequired = true;
+    render(
+      <ChatLayout>
+        <div data-testid="page-content" />
+      </ChatLayout>,
+    );
+    expect(screen.queryByTestId("chat-shell")).not.toBeInTheDocument();
+    expect(mockReplace).not.toHaveBeenCalled();
+    expect(mockUseUISettings).not.toHaveBeenCalled();
   });
 
   it("renders the chat shell when enable_chat_ui is on", () => {

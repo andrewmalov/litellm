@@ -1,5 +1,7 @@
 "use client";
 
+import { useAuth } from "@/contexts/AuthContext";
+import LoadingScreen from "@/components/common_components/LoadingScreen";
 import { Suspense, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import useAuthorized from "@/app/(dashboard)/hooks/useAuthorized";
@@ -45,10 +47,22 @@ function ChatLayoutContent({ children }: { children: React.ReactNode }) {
   );
 }
 
+function ChatAuthGate({ children }: { children: React.ReactNode }) {
+  const { authLoading, passwordResetRequired } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!authLoading && passwordResetRequired) router.replace(uiHref("change-password"));
+  }, [authLoading, passwordResetRequired, router]);
+
+  if (authLoading || passwordResetRequired) return <LoadingScreen />;
+  return <ChatLayoutContent>{children}</ChatLayoutContent>;
+}
+
 export default function ChatLayout({ children }: { children: React.ReactNode }) {
   return (
     <Suspense>
-      <ChatLayoutContent>{children}</ChatLayoutContent>
+      <ChatAuthGate>{children}</ChatAuthGate>
     </Suspense>
   );
 }

@@ -40,6 +40,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [authLoading, setAuthLoading] = useState(true);
   const [token, setToken] = useState<string | null>(null);
+  const [resolvedToken, setResolvedToken] = useState<string | null>(null);
   const [userID, setUserID] = useState<string | null>(null);
   const [userRole, setUserRole] = useState("");
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -85,6 +86,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Decode JWT and populate derived auth state whenever the token changes.
   useEffect(() => {
     if (!token) {
+      setAccessToken(null);
+      setPasswordResetRequired(false);
+      setResolvedToken(null);
       return;
     }
 
@@ -127,10 +131,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUserID(decoded.user_id);
     }
     setPasswordResetRequired(decoded.password_reset_required === true);
+    setResolvedToken(token);
   }, [token]);
 
   const value: AuthContextValue = {
-    authLoading,
+    authLoading: authLoading || token !== resolvedToken,
     token,
     userID,
     userRole,

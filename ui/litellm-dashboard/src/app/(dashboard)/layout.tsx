@@ -210,40 +210,49 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { accessToken, authLoading, passwordResetRequired } = useAuth();
   const isInvitationFlow = Boolean(searchParams.get("invitation_id"));
+  const isChangePasswordPage = routeSegmentForPathname(pathname) === "change-password";
 
   // Legacy invitation links point at /ui/?invitation_id=; the onboarding form now lives at its own
   // /onboarding route. Redirect once ui-config has loaded so uiHref resolves the SERVER_ROOT_PATH base.
   useEffect(() => {
-    if (!authLoading && isInvitationFlow) {
+    if (!authLoading && isInvitationFlow && !passwordResetRequired) {
       router.replace(`${uiHref("onboarding")}?${searchParams.toString()}`);
     }
-  }, [authLoading, isInvitationFlow, router, searchParams]);
+  }, [authLoading, isInvitationFlow, passwordResetRequired, router, searchParams]);
 
   // A session flagged for a forced password reset can only reach the change-password
   // endpoint server-side; keep the UI on the matching page.
   useEffect(() => {
-    if (!authLoading && passwordResetRequired && !pathname?.endsWith("/change-password")) {
+    if (!authLoading && passwordResetRequired && !isChangePasswordPage) {
       router.replace(uiHref("change-password"));
     }
-  }, [authLoading, passwordResetRequired, pathname, router]);
+  }, [authLoading, passwordResetRequired, isChangePasswordPage, router]);
 
-  if (authLoading || isInvitationFlow) {
+  if (authLoading || (passwordResetRequired && !isChangePasswordPage)) {
+    return <LoadingScreen />;
+  }
+
+  if (passwordResetRequired) {
+    return <main className="min-h-screen bg-background px-4 pb-10">{children}</main>;
+  }
+
+  if (isInvitationFlow) {
     return <LoadingScreen />;
   }
 
   return (
-    <ThemeProvider accessToken={accessToken}>
-      <DashboardShell>{children}</DashboardShell>
-    </ThemeProvider>
+    <PluginModeProviderWithAuth>
+      <ThemeProvider accessToken={accessToken}>
+        <DashboardShell>{children}</DashboardShell>
+      </ThemeProvider>
+    </PluginModeProviderWithAuth>
   );
 }
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   return (
     <Suspense fallback={<LoadingScreen />}>
-      <PluginModeProviderWithAuth>
-        <LayoutContent>{children}</LayoutContent>
-      </PluginModeProviderWithAuth>
+      <LayoutContent>{children}</LayoutContent>
     </Suspense>
   );
 }

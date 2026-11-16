@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, renderWithProviders as render, screen, waitFor, within } from "../../../tests/test-utils";
 import { usePathname } from "next/navigation";
@@ -207,6 +208,7 @@ describe("(dashboard) Layout", () => {
 
     afterEach(() => {
       document.cookie = "token=; Max-Age=0; Path=/";
+      vi.unstubAllGlobals();
     });
 
     it("routes a session flagged password_reset_required to the change-password page", async () => {
@@ -230,6 +232,50 @@ describe("(dashboard) Layout", () => {
 
       await waitFor(() => expect(replaceMock).toHaveBeenCalledWith(expect.stringContaining("/change-password")));
     });
+
+    it("never mounts protected content while resolving a flagged session", async () => {
+      const mounted = vi.fn();
+      function ProtectedPage() {
+        useEffect(() => {
+          mounted();
+        }, []);
+        return <div data-testid="protected-page" />;
+      }
+      document.cookie = `token=${sessionCookie({ user_id: "flagged-user", key: "sk-session", password_reset_required: true })}; Path=/`;
+      render(
+        <AuthProvider>
+          <Layout>
+            <ProtectedPage />
+          </Layout>
+        </AuthProvider>,
+      );
+      pendingUiConfig.resolve();
+      await waitFor(() => expect(replaceMock).toHaveBeenCalledWith(expect.stringContaining("/change-password")));
+      expect(mounted).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("dashboard-header")).not.toBeInTheDocument();
+    });
+
+    it.each(["/ui/change-password", "/ui/change-password/"])(
+      "renders the forced password page at %s without the management shell or API calls",
+      async (pathname) => {
+        const apiRequests = vi.fn().mockResolvedValue(Response.json({}));
+        vi.stubGlobal("fetch", apiRequests);
+        vi.mocked(usePathname).mockReturnValue(pathname);
+        document.cookie = `token=${sessionCookie({ user_id: "flagged-user", key: "sk-session", password_reset_required: true })}; Path=/`;
+        render(
+          <AuthProvider>
+            <Layout>
+              <p>Change password form</p>
+            </Layout>
+          </AuthProvider>,
+        );
+        pendingUiConfig.resolve();
+        expect(await screen.findByText("Change password form")).toBeInTheDocument();
+        expect(replaceMock).not.toHaveBeenCalled();
+        expect(screen.queryByTestId("dashboard-header")).not.toBeInTheDocument();
+        expect(apiRequests).not.toHaveBeenCalled();
+      },
+    );
 
     it("does not reroute an unflagged session", async () => {
       document.cookie = `token=${sessionCookie({
