@@ -1,7 +1,7 @@
 from typing import Final
 
-from litellm.router_utils.exclusive_pool.models import Admission, Limits, PoolConfig, Resource
-from litellm.router_utils.exclusive_pool.state import acquire, complete, empty_state, heartbeat, start
+from litellm.router_utils.exclusive_pool.models import Admission, Denied, Granted, Limits, PoolConfig, Resource
+from litellm.router_utils.exclusive_pool.state import acquire, complete, empty_state, heartbeat, start, sweep
 
 
 def config() -> PoolConfig:
@@ -90,15 +90,20 @@ def test_full_fallback_does_not_migrate_an_idle_bound_client_to_a_free_primary()
     assert full.failure.code == "endpoint_pool_exhausted"
 
 
-def test_quarantined_upstream_cannot_be_reassigned_even_after_idle_expiry() -> None:
-    from litellm.router_utils.exclusive_pool.state import quarantine
-
+def test_stale_operation_releases_route_after_five_minutes_without_heartbeat() -> None:
     cfg: Final = config()
-    pending: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)
-    uncertain: Final = quarantine(start(pending.state, "one", now=0), "one")
-    next_client: Final = acquire(uncertain, cfg, request("two"), now=5000)
-    assert next_client.resource == "b"
-    assert next_client.state.operations[0].id == "one"
+    initial: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)
+    assert isinstance(initial, Granted)
+    active: Final = heartbeat(start(initial.state, "one", now=0), "one", now=50)
+    retry: Final = request("one", operation="retry")
+    before_expiry: Final = sweep(active, cfg, now=349)
+    denied: Final = acquire(before_expiry, cfg, retry, now=349)
+    assert isinstance(denied, Denied)
+    assert denied.failure.code == "endpoint_pool_exhausted"
+    after_expiry: Final = sweep(before_expiry, cfg, now=350)
+    granted: Final = acquire(after_expiry, cfg, retry, now=350)
+    assert isinstance(granted, Granted)
+    assert granted.resource == initial.resource
 
 
 def test_conservative_token_reservations_are_reconciled_from_usage() -> None:
@@ -132,8 +137,6 @@ def test_device_changes_cannot_bypass_key_rpm_limit() -> None:
 
 
 def test_dead_unsent_reservations_are_reclaimed_but_started_work_is_quarantined() -> None:
-    from litellm.router_utils.exclusive_pool.state import sweep
-
     cfg: Final = config()
     pending: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)
     unsent: Final = sweep(pending.state, cfg, now=cfg.heartbeat_timeout)
@@ -142,12 +145,12 @@ def test_dead_unsent_reservations_are_reclaimed_but_started_work_is_quarantined(
     started: Final = start(pending.state, "one", now=0)
     uncertain: Final = sweep(started, cfg, now=cfg.heartbeat_timeout)
     assert uncertain.operations[0].quarantined
-    assert acquire(uncertain, cfg, request("two"), now=10000).resource == "b"
+    assert acquire(uncertain, cfg, request("two"), now=299).resource == "b"
 
 
 def test_sweep_removes_expired_events_and_idle_bindings() -> None:
     from litellm.router_utils.exclusive_pool.models import Event
-    from litellm.router_utils.exclusive_pool.state import record_event, sweep
+    from litellm.router_utils.exclusive_pool.state import record_event
 
     cfg: Final = config().model_copy(update={"event_retention_seconds": 10})
     initial: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)

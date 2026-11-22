@@ -133,7 +133,7 @@ Retired catalog records are retained for safety. For a registered ID, the public
 
 Discovery reads the writer database. A failed DB read or malformed pool metadata does not become an empty catalog. Protected requests fail closed when required synchronization fails. No new admissions or probes occur once the catalog is older than `heartbeat_timeout`. Unrelated models continue serving independently
 
-Use `confirm` only after verifying the named quarantined request ended upstream. Timeout, disconnect, proxy shutdown and lost heartbeat do not prove completion. A healthy operation cannot be confirmed away
+The recovery worker releases quarantined operations on its first sweep at least five minutes after their last heartbeat. An upstream that keeps generating beyond that point can overlap with newly admitted work. Use `confirm` to release a quarantined operation early after verifying the named request ended upstream. A healthy operation cannot be confirmed away
 
 Changing pool policy in `pool.json` requires draining operations, stopping the proxy, running `pool-admin reconfigure` and recreating workers. Reconfiguration rejects active operations. Stop the stack with `docker compose down`, preserving both volumes. Never use `down -v` on a deployment
 

@@ -21,6 +21,7 @@ from .models import (
 )
 
 IDLE_SECONDS: Final = 900
+QUARANTINE_TIMEOUT_SECONDS: Final = 300
 
 
 def unavailable() -> Failure:
@@ -418,12 +419,23 @@ def record_event(state: Snapshot, config: PoolConfig, event: Event) -> Snapshot:
     return state.model_copy(update={"events": (*retained, event)[-256:]})
 
 
+def _expire_quarantine(state: Snapshot, config: PoolConfig, operation: Operation, now: float) -> Snapshot:
+    resource: Final = next(r for r in config.resources if r.id == operation.resource)
+    return state.model_copy(
+        update={
+            "operations": tuple(op for op in state.operations if op.id != operation.id),
+            "charges": tuple(_settle(charge, operation, resource, now, None) for charge in state.charges),
+            "health": tuple(_released_probe(health, operation) for health in state.health),
+        }
+    )
+
+
 def sweep(state: Snapshot, config: PoolConfig, now: float) -> Snapshot:
     expired: Final = tuple(
         op for op in state.operations if not op.started and now - op.heartbeat >= config.heartbeat_timeout
     )
     released: Final = reduce(lambda current, op: abort(current, config, op.id, now), expired, state)
-    return _prune(released, now).model_copy(
+    quarantined: Final = released.model_copy(
         update={
             "operations": tuple(
                 op.model_copy(update={"quarantined": True}) if now - op.heartbeat >= config.heartbeat_timeout else op
@@ -432,3 +444,8 @@ def sweep(state: Snapshot, config: PoolConfig, now: float) -> Snapshot:
             "events": tuple(event for event in released.events if event.time > now - config.event_retention_seconds),
         }
     )
+    timed_out: Final = tuple(
+        op for op in quarantined.operations if op.quarantined and now - op.heartbeat >= QUARANTINE_TIMEOUT_SECONDS
+    )
+    recovered: Final = reduce(lambda current, op: _expire_quarantine(current, config, op, now), timed_out, quarantined)
+    return _prune(recovered, now)
