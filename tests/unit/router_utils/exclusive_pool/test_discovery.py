@@ -93,7 +93,7 @@ def test_quarantine_and_removal_cannot_release_a_physical_upstream_through_an_al
     uncertain: Final = quarantine(start(first.state, "first", 2), "first")
     removed: Final = _reconcile(uncertain, config, tuple(row for row in rows if row.model_id != "a-opus"), 3)
     switch: Final = _admit(removed, "one", "sonnet", "switch", 4)
-    assert not isinstance(switch, Granted)
+    assert isinstance(switch, Granted) and switch.resource == "a-sonnet"
     other: Final = _admit(removed, "two", "sonnet", "other", 4)
     assert isinstance(other, Granted) and other.resource == "b-sonnet"
     assert removed.operations == uncertain.operations
@@ -203,7 +203,8 @@ def test_shared_quota_does_not_merge_physical_ownership() -> None:
     initial: Final = _reconcile(empty_state(config), config, rows, 1)
     first: Final = _admit(initial, "one", "opus", "first")
     assert isinstance(first, Granted) and first.resource == "a-opus"
-    other: Final = _admit(first.state, "two", "sonnet", "other")
+    uncertain: Final = quarantine(start(first.state, "first", 2), "first")
+    other: Final = _admit(uncertain, "two", "sonnet", "other")
     assert isinstance(other, Granted) and other.resource == "b-sonnet"
 
 
@@ -354,19 +355,14 @@ def test_removed_resource_drains_without_losing_uncertain_work_or_quota() -> Non
     removed: Final = _reconcile(running, config, (_row("b"),), 3)
     assert removed.operations == running.operations
     assert removed.charges == running.charges
-    denied: Final = acquire(
+    moved: Final = acquire(
         removed,
         config.resolve(removed),
         Admission(client="c", device="d", operation="next", tokens=1, eligible=("b",)),
         4,
     )
-    assert not isinstance(denied, Granted)
-    ended: Final = complete(removed, config.resolve(removed), "op", 5)
-    moved: Final = acquire(
-        ended, config.resolve(ended), Admission(client="c", device="d", operation="next", tokens=1, eligible=("b",)), 6
-    )
     assert isinstance(moved, Granted) and moved.resource == "b"
-    restored: Final = _reconcile(removed, config, (_row("a"), _row("b")), 7)
+    restored: Final = _reconcile(moved.state, config, (_row("a"), _row("b")), 7)
     blocked: Final = acquire(
         restored,
         config.resolve(restored),
@@ -374,6 +370,14 @@ def test_removed_resource_drains_without_losing_uncertain_work_or_quota() -> Non
         8,
     )
     assert not isinstance(blocked, Granted)
+    ended: Final = complete(restored, config.resolve(restored), "op", 9)
+    newcomer: Final = acquire(
+        ended,
+        config.resolve(ended),
+        Admission(client="new", device="d", operation="new", tokens=1, eligible=("a",)),
+        10,
+    )
+    assert isinstance(newcomer, Granted) and newcomer.resource == "a"
 
 
 def test_resource_identity_and_role_cannot_be_rewritten_by_rediscovery() -> None:

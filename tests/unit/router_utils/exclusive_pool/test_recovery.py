@@ -25,22 +25,45 @@ def test_retry_after_is_a_lower_bound_including_http_dates() -> None:
     assert retry_after("Thu, 01 Jan 1970 00:10:00 GMT", now=1000) == 0
 
 
-def test_uncertain_network_failure_blocks_reassignment_and_probes() -> None:
+def test_uncertain_network_failure_allows_failover_and_recovery_without_reassignment() -> None:
     cfg: Final = config()
     pending: Final = acquire(
         empty_state(cfg), cfg, Admission(client="c", device="d", operation="one", tokens=10, eligible=("a", "f")), now=0
     )
     assert isinstance(pending, Granted)
+    policy: Final = classify(
+        litellm.APIConnectionError(message="connection lost", model="model", llm_provider="openai")
+    )
     uncertain: Final = fail(
         start(pending.state, "one", now=0),
         cfg,
         "one",
-        classify(litellm.APIConnectionError(message="connection lost", model="model", llm_provider="openai")),
+        policy,
         now=5,
         jitter=0.1,
     )
     assert uncertain.operations[0].quarantined
-    assert isinstance(claim_probe(uncertain, cfg, "a", "probe", now=10000), Denied)
+    owner: Final = Admission(client="c", device="d", operation="next", tokens=10, eligible=("a", "f"))
+    failover: Final = acquire(uncertain, cfg, owner, now=6)
+    assert isinstance(failover, Granted) and failover.resource == "f"
+    assert isinstance(claim_probe(uncertain, cfg, "a", "early", now=6), Denied)
+    probe: Final = claim_probe(uncertain, cfg, "a", "probe", now=30)
+    assert isinstance(probe, Granted)
+    failed_probe: Final = fail(
+        start(probe.state, "probe", now=30),
+        cfg,
+        "probe",
+        policy,
+        now=31,
+        jitter=0,
+    )
+    retried: Final = claim_probe(failed_probe, cfg, "a", "retry-probe", now=65)
+    assert isinstance(retried, Granted)
+    ready: Final = probe_success(retried.state, cfg, "retry-probe", now=66)
+    other: Final = owner.model_copy(update={"client": "other", "operation": "other", "eligible": ("a",)})
+    assert isinstance(acquire(ready, cfg, other, now=67), Denied)
+    resumed: Final = acquire(ready, cfg, owner, now=67)
+    assert isinstance(resumed, Granted) and resumed.resource == "a"
 
 
 def test_confirmed_error_cools_down_once_and_only_one_coordinator_can_probe() -> None:

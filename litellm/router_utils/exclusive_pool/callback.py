@@ -415,7 +415,9 @@ class ExclusiveEndpointPool(CustomLogger):
             op.id == operation and not op.quarantined for op in snapshot.operations
         ):
             return False
-        updated: Final = await self.store.transact(lambda current, now: state.heartbeat(current, operation, now))
+        updated: Final = await self.store.transact(
+            lambda current, now: state.heartbeat(current, self.store.config, operation, now)
+        )
         return not isinstance(updated, Failure)
 
     def _ensure_recovery(self) -> None:

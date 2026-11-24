@@ -104,7 +104,7 @@ register_upstream upstream-b "$UPSTREAM_B_BASE_URL" "$UPSTREAM_B_API_KEY"
 
 Supply the two API base URLs and credentials in the shell running registration, without adding them to Compose. The function assumes the pool ID is `exclusive`. Registrations use the native `anthropic/` provider. Supply the API root; the function also accepts and removes a trailing `/v1`. Public model names stay unchanged
 
-A client assigned upstream-a can request any of its registered models and stays on upstream-a, including with concurrent requests. Another client receives upstream-b. With two primaries and no fallback, a third client receives `endpoint_pool_exhausted`. All model registrations on one upstream share parallel, RPM and TPM limits and quarantine. If the assigned healthy upstream lacks the requested model, the request fails with `endpoint_pool_exhausted` until the session expires or normal failover becomes possible
+A client assigned upstream-a can request any of its registered models and stays on upstream-a, including with concurrent requests. Another client receives upstream-b. With two primaries and no fallback, a third client receives `endpoint_pool_exhausted`. All model registrations on one upstream share parallel, RPM and TPM limits. Quarantine holds the physical upstream for the affected client across all its models. The client can still send new requests to a ready upstream, and quarantined operations release parallel slots while their reservations count in the original quota window. Separate upstreams that share a quota scope remain independently assignable. If the assigned healthy upstream lacks the requested model, the request fails with `endpoint_pool_exhausted` until the session expires or normal failover becomes possible
 
 Model registrations on the same physical upstream must have the same role, effective quota scope and limits. Set a common `exclusive_quota_scope` only when distinct physical upstreams also share an account quota. That shared quota does not merge their exclusive ownership
 
@@ -133,7 +133,7 @@ Retired catalog records are retained for safety. For a registered ID, the public
 
 Discovery reads the writer database. A failed DB read or malformed pool metadata does not become an empty catalog. Protected requests fail closed when required synchronization fails. No new admissions or probes occur once the catalog is older than `heartbeat_timeout`. Unrelated models continue serving independently
 
-The recovery worker releases quarantined operations on its first sweep at least five minutes after their last heartbeat. An upstream that keeps generating beyond that point can overlap with newly admitted work. Use `confirm` to release a quarantined operation early after verifying the named request ended upstream. A healthy operation cannot be confirmed away
+The recovery worker releases quarantined operations on its first sweep at least five minutes after their last heartbeat. New requests from the same client can overlap with a quarantined request that is still generating upstream. After the quarantine expires, requests from another client can overlap too. Use `confirm` to release a quarantined operation early after verifying the named request ended upstream. A healthy operation cannot be confirmed away
 
 Changing pool policy in `pool.json` requires draining operations, stopping the proxy, running `pool-admin reconfigure` and recreating workers. Reconfiguration rejects active operations. Stop the stack with `docker compose down`, preserving both volumes. Never use `down -v` on a deployment
 

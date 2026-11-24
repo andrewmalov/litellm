@@ -45,6 +45,10 @@ def _active(state: Snapshot, client: str) -> tuple[Operation, ...]:
     return tuple(op for op in state.operations if op.client == client)
 
 
+def in_flight(operation: Operation, config: PoolConfig, now: float) -> bool:
+    return not operation.quarantined and now - operation.heartbeat < config.heartbeat_timeout
+
+
 def _live(state: Snapshot, session: Session, now: float) -> bool:
     return bool(_active(state, session.client)) or now < session.last_activity + IDLE_SECONDS
 
@@ -64,9 +68,20 @@ def _charges(state: Snapshot, scope: str) -> tuple[Charge, ...]:
     return tuple(c for c in state.charges if c.scope == scope)
 
 
-def has_capacity(state: Snapshot, scope: str, limits: Limits, tokens: int, now: float, logical: str) -> bool:
+def has_capacity(
+    state: Snapshot, config: PoolConfig, scope: str, limits: Limits, tokens: int, now: float, logical: str
+) -> bool:
+    uncertain: Final = frozenset(
+        op.logical if scope == f"client:{op.client}" else op.id
+        for op in state.operations
+        if not in_flight(op, config, now)
+    )
     charges: Final = tuple(
-        c for c in _charges(state, scope) if c.settled_at is None or max(c.created_at, c.settled_at) > now - 60
+        c
+        for c in _charges(state, scope)
+        if c.created_at > now - 60
+        or (c.settled_at is None and c.operation not in uncertain)
+        or (c.settled_at is not None and c.settled_at > now - 60)
     )
     existing: Final = next((c for c in charges if c.operation == logical), None)
     count: Final = sum(c.created_at > now - 60 for c in charges)
@@ -86,17 +101,24 @@ def _resource_available(
     operations: Final = _scope_operations(state, config, resource)
     if resource.id not in request.eligible or health.status != "ready":
         return False
-    if any(op.quarantined or now - op.heartbeat >= config.heartbeat_timeout for op in operations):
+    parallel: Final = sum(in_flight(op, config, now) for op in operations)
+    if parallel >= min(resource.limits.parallel, health.capacity or resource.limits.parallel):
         return False
-    if len(operations) >= min(resource.limits.parallel, health.capacity or resource.limits.parallel):
+    upstream_ids: Final = config.upstream_deployments(resource.upstream_id)
+    exclusive: Final = not config.is_fallback(resource.id)
+    if exclusive and any(s.client != request.client and s.resource in upstream_ids for s in state.sessions):
         return False
-    if not config.is_fallback(resource.id):
-        upstream_ids: Final = config.upstream_deployments(resource.upstream_id)
-        if any(s.client != request.client and s.resource in upstream_ids for s in state.sessions):
-            return False
-        if any(op.client != request.client and op.resource in upstream_ids for op in state.operations):
-            return False
-    return has_capacity(state, f"resource:{resource.scope}", resource.limits, request.tokens, now, request.operation)
+    if any(
+        op.resource in upstream_ids
+        and not op.probe
+        and op.client != request.client
+        and (exclusive or not in_flight(op, config, now))
+        for op in state.operations
+    ):
+        return False
+    return has_capacity(
+        state, config, f"resource:{resource.scope}", resource.limits, request.tokens, now, request.operation
+    )
 
 
 def _ordered_primaries(state: Snapshot, config: PoolConfig) -> tuple[Resource, ...]:
@@ -111,7 +133,8 @@ def _ordered_primaries(state: Snapshot, config: PoolConfig) -> tuple[Resource, .
 def _choose(
     state: Snapshot, config: PoolConfig, request: Admission, session: Session | None, now: float
 ) -> Resource | None:
-    if session is not None and session.resource is None and _active(state, request.client):
+    active: Final = any(in_flight(op, config, now) for op in _active(state, request.client))
+    if session is not None and session.resource is None and active:
         return None
     if session is not None and session.pinned_upstream is not None:
         return next(
@@ -129,9 +152,7 @@ def _choose(
         if selected is not None:
             return selected
         sibling_ids: Final = frozenset(r.id for r in siblings)
-        if any(h.status == "ready" and h.resource in sibling_ids for h in state.health) or _active(
-            state, request.client
-        ):
+        if any(h.status == "ready" and h.resource in sibling_ids for h in state.health) or active:
             return None
     return next(
         (
@@ -152,7 +173,7 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
     session: Final = next((s for s in current.sessions if s.client == request.client), None)
     repeated: Final = next((op for op in current.operations if op.id == request.operation), None)
     if repeated is not None:
-        if repeated.client != request.client or repeated.quarantined:
+        if repeated.client != request.client or not in_flight(repeated, config, now):
             return Denied(state=state, failure=unavailable())
         return Granted(state=current, resource=repeated.resource, operation=repeated.id)
     if request.requires_binding and (session is None or session.resource is None):
@@ -166,8 +187,9 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         )
     logical: Final = request.logical or request.operation
     client_limits: Final = request.limits or config.client_limits
-    if len(_active(current, request.client)) >= client_limits.parallel or not has_capacity(
-        current, f"client:{request.client}", client_limits, request.tokens, now, logical
+    parallel: Final = sum(in_flight(op, config, now) for op in _active(current, request.client))
+    if parallel >= client_limits.parallel or not has_capacity(
+        current, config, f"client:{request.client}", client_limits, request.tokens, now, logical
     ):
         return Denied(
             state=record_event(
@@ -245,7 +267,7 @@ def reserve_counted_tokens(
     if tokens <= 0:
         return Denied(state=state, failure=unavailable())
     if not has_capacity(
-        remaining, f"client:{active.client}", limits or config.client_limits, tokens, now, active.logical
+        remaining, config, f"client:{active.client}", limits or config.client_limits, tokens, now, active.logical
     ):
         return Denied(
             state=state,
@@ -256,7 +278,7 @@ def reserve_counted_tokens(
                 retry_after=60,
             ),
         )
-    if not has_capacity(remaining, f"resource:{resource.scope}", resource.limits, tokens, now, operation):
+    if not has_capacity(remaining, config, f"resource:{resource.scope}", resource.limits, tokens, now, operation):
         return Denied(state=state, failure=exhausted())
     return Granted(
         resource=active.resource,
@@ -300,11 +322,11 @@ def start(state: Snapshot, operation: str, now: float) -> Snapshot:
     )
 
 
-def heartbeat(state: Snapshot, operation: str, now: float) -> Snapshot:
+def heartbeat(state: Snapshot, config: PoolConfig, operation: str, now: float) -> Snapshot:
     return state.model_copy(
         update={
             "operations": tuple(
-                op.model_copy(update={"heartbeat": now}) if op.id == operation and not op.quarantined else op
+                op.model_copy(update={"heartbeat": now}) if op.id == operation and in_flight(op, config, now) else op
                 for op in state.operations
             ),
         }
@@ -327,8 +349,10 @@ def complete(
     active: Final = next((op for op in state.operations if op.id == operation), None)
     if active is None:
         return state
+    if not in_flight(active, config, now):
+        return _release_uncertain(state, config, active, actual_tokens)
     remaining: Final = tuple(op for op in state.operations if op.id != operation)
-    client_still_active: Final = any(op.client == active.client for op in remaining)
+    client_still_active: Final = any(op.client == active.client and in_flight(op, config, now) for op in remaining)
     resource: Final = next(r for r in config.resources if r.id == active.resource)
     upstream_ids: Final = config.upstream_deployments(resource.upstream_id)
     return state.model_copy(
@@ -350,13 +374,18 @@ def _finish_session(session: Session, active: Operation, still_active: bool, now
     return session.model_copy(update={"last_activity": now, "established": True})
 
 
-def _settle(charge: Charge, operation: Operation, resource: Resource, now: float, actual: int | None) -> Charge:
+def _settle(charge: Charge, operation: Operation, resource: Resource, now: float | None, actual: int | None) -> Charge:
     if (charge.scope, charge.operation) not in (
         (f"client:{operation.client}", operation.logical),
         (f"resource:{resource.scope}", operation.id),
     ):
         return charge
-    return charge.model_copy(update={"settled_at": now, "tokens": charge.tokens if actual is None else max(0, actual)})
+    return charge.model_copy(
+        update={
+            "settled_at": charge.created_at if now is None else now,
+            "tokens": charge.tokens if actual is None else max(0, actual),
+        }
+    )
 
 
 def abort(state: Snapshot, config: PoolConfig, operation: str, now: float) -> Snapshot:
@@ -419,12 +448,14 @@ def record_event(state: Snapshot, config: PoolConfig, event: Event) -> Snapshot:
     return state.model_copy(update={"events": (*retained, event)[-256:]})
 
 
-def _expire_quarantine(state: Snapshot, config: PoolConfig, operation: Operation, now: float) -> Snapshot:
+def _release_uncertain(
+    state: Snapshot, config: PoolConfig, operation: Operation, actual_tokens: int | None
+) -> Snapshot:
     resource: Final = next(r for r in config.resources if r.id == operation.resource)
     return state.model_copy(
         update={
             "operations": tuple(op for op in state.operations if op.id != operation.id),
-            "charges": tuple(_settle(charge, operation, resource, now, None) for charge in state.charges),
+            "charges": tuple(_settle(charge, operation, resource, None, actual_tokens) for charge in state.charges),
             "health": tuple(_released_probe(health, operation) for health in state.health),
         }
     )
@@ -447,5 +478,5 @@ def sweep(state: Snapshot, config: PoolConfig, now: float) -> Snapshot:
     timed_out: Final = tuple(
         op for op in quarantined.operations if op.quarantined and now - op.heartbeat >= QUARANTINE_TIMEOUT_SECONDS
     )
-    recovered: Final = reduce(lambda current, op: _expire_quarantine(current, config, op, now), timed_out, quarantined)
+    recovered: Final = reduce(lambda current, op: _release_uncertain(current, config, op, None), timed_out, quarantined)
     return _prune(recovered, now)

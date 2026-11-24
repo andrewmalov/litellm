@@ -26,7 +26,7 @@ from .models import (
     Snapshot,
 )
 from .request import recovery_request
-from .state import complete, exhausted, has_capacity, quarantine, record_event, reject
+from .state import complete, exhausted, has_capacity, in_flight, quarantine, record_event, reject
 
 _RESPONSE: Final = TypeAdapter(httpx.Response, config=ConfigDict(arbitrary_types_allowed=True))
 _CODE: Final = TypeAdapter[str | None](str | None)
@@ -179,14 +179,16 @@ def claim_probe(state: Snapshot, config: PoolConfig, resource: str, operation: s
     target: Final = next(r for r in config.resources if r.id == resource)
     upstream_ids: Final = config.upstream_deployments(target.upstream_id)
     scope_ids: Final = frozenset(r.id for r in config.resources if r.scope == target.scope)
-    if health.status != "cooldown" or health.retry_at > now or any(op.resource in scope_ids for op in state.operations):
+    if health.status != "cooldown" or health.retry_at > now:
+        return Denied(state=state, failure=exhausted())
+    if any(op.resource in scope_ids and in_flight(op, config, now) for op in state.operations):
         return Denied(state=state, failure=exhausted())
     request: Final = recovery_request(resource)
     estimate: Final = estimate_input_tokens(request, {"litellm_params": {"model": ""}})
     if isinstance(estimate, Failure):
         return Denied(state=state, failure=estimate)
     tokens: Final = request.counted_reservation(estimate, 1)
-    if not has_capacity(state, f"resource:{target.scope}", target.limits, tokens, now, operation):
+    if not has_capacity(state, config, f"resource:{target.scope}", target.limits, tokens, now, operation):
         return Denied(state=state, failure=exhausted())
     probe: Final = Operation(
         id=operation,

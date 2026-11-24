@@ -339,7 +339,7 @@ def test_real_proxy_keeps_key_assignments_across_device_changes_and_missing_iden
 
 @pytest.mark.parametrize("rig", [False, "anthropic"], indirect=True)
 @pytest.mark.parametrize("route", ["chat/completions", "messages?beta=true"])
-def test_cancelled_client_stream_does_not_release_an_upstream_that_is_still_running(rig: Rig, route: str) -> None:
+def test_cancelled_stream_keeps_the_upstream_available_to_its_owner_only(rig: Rig, route: str) -> None:
     keys: Final = tuple(
         str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"]) for _ in range(2)
     )
@@ -358,12 +358,18 @@ def test_cancelled_client_stream_does_not_release_an_upstream_that_is_still_runn
         ) as streamed:
             assert streamed.status_code == 200
             assert next(line for line in streamed.iter_lines() if line.startswith("data: "))
+        with Redis(host=os.environ["REDIS_HOST"], port=int(os.environ["REDIS_PORT"])) as redis:
+            state_key: Final = f"litellm:exclusive-pool:{{{rig.config.pool_id}}}:state"
+            eventually(
+                lambda: Snapshot.model_validate_json(redis.get(state_key)),
+                lambda snapshot: any(op.quarantined for op in snapshot.operations),
+            )
         next_client: Final = rig.chat(keys[1], "other-device")
         assert next_client.status_code == 200, next_client.text
         assert next_client.headers["x-litellm-model-id"] == rig.config.primaries[1].id
         changed: Final = rig.chat(keys[0], "other-device")
-        assert changed.status_code == 429, changed.text
-        assert changed.json()["error"]["code"] == "client_rate_limit_exceeded"
+        assert changed.status_code == 200, changed.text
+        assert changed.headers["x-litellm-model-id"] == rig.config.primaries[0].id
     finally:
         rig.stream_release.set()
         rig.proxy.post("/key/delete", {"keys": list(keys)})

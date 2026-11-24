@@ -1,7 +1,18 @@
+from functools import reduce
 from typing import Final
 
+import pytest
+
 from litellm.router_utils.exclusive_pool.models import Admission, Denied, Granted, Limits, PoolConfig, Resource
-from litellm.router_utils.exclusive_pool.state import acquire, complete, empty_state, heartbeat, start, sweep
+from litellm.router_utils.exclusive_pool.state import (
+    acquire,
+    complete,
+    empty_state,
+    heartbeat,
+    quarantine,
+    start,
+    sweep,
+)
 
 
 def config() -> PoolConfig:
@@ -46,10 +57,11 @@ def test_live_request_holds_binding_beyond_idle_and_late_completion_is_idempoten
     cfg: Final = config()
     allocated: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)
     active: Final = start(allocated.state, "one", now=0)
-    parallel: Final = acquire(heartbeat(active, "one", now=999), cfg, request("one", "other", "parallel"), now=1000)
+    fresh: Final = reduce(lambda snapshot, now: heartbeat(snapshot, cfg, "one", now), range(50, 1001, 50), active)
+    parallel: Final = acquire(fresh, cfg, request("one", "other", "parallel"), now=1001)
     assert parallel.resource == allocated.resource
     assert parallel.state.sessions[0].generation == allocated.state.sessions[0].generation
-    ended: Final = complete(active, cfg, "one", now=1100, actual_tokens=5)
+    ended: Final = complete(heartbeat(fresh, cfg, "one", now=1050), cfg, "one", now=1100, actual_tokens=5)
     assert complete(ended, cfg, "one", now=1500, actual_tokens=5) == ended
     assert acquire(ended, cfg, request("one", "other", "new"), now=1999).resource == allocated.resource
     assert acquire(ended, cfg, request("one", "other", "new"), now=2000).resource == "b"
@@ -90,20 +102,65 @@ def test_full_fallback_does_not_migrate_an_idle_bound_client_to_a_free_primary()
     assert full.failure.code == "endpoint_pool_exhausted"
 
 
-def test_stale_operation_releases_route_after_five_minutes_without_heartbeat() -> None:
-    cfg: Final = config()
+def test_stale_operation_allows_the_owner_before_expiry_and_reassignment_after_expiry() -> None:
+    cfg: Final = config().model_copy(update={"client_limits": Limits(parallel=1)})
     initial: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)
     assert isinstance(initial, Granted)
-    active: Final = heartbeat(start(initial.state, "one", now=0), "one", now=50)
+    active: Final = heartbeat(start(initial.state, "one", now=0), cfg, "one", now=50)
     retry: Final = request("one", operation="retry")
     before_expiry: Final = sweep(active, cfg, now=349)
-    denied: Final = acquire(before_expiry, cfg, retry, now=349)
-    assert isinstance(denied, Denied)
-    assert denied.failure.code == "endpoint_pool_exhausted"
+    assert isinstance(acquire(before_expiry, cfg, retry, now=349), Granted)
+    other: Final = request("two").model_copy(update={"eligible": (initial.resource,)})
+    assert isinstance(acquire(before_expiry, cfg, other, now=349), Denied)
     after_expiry: Final = sweep(before_expiry, cfg, now=350)
-    granted: Final = acquire(after_expiry, cfg, retry, now=350)
+    idle: Final = sweep(after_expiry, cfg, now=900)
+    granted: Final = acquire(idle, cfg, other, now=900)
     assert isinstance(granted, Granted)
     assert granted.resource == initial.resource
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_uncertain_fallback_work_blocks_handoff_but_frees_the_owners_parallel_slot(explicit: bool) -> None:
+    cfg: Final = config().model_copy(
+        update={
+            "client_limits": Limits(parallel=1),
+            "fallback": Resource(id="f", upstream_id="physical-f", limits=Limits(parallel=1)),
+        }
+    )
+    owner: Final = request("one").model_copy(update={"eligible": ("f",)})
+    initial: Final = acquire(empty_state(cfg), cfg, owner, now=0)
+    assert isinstance(initial, Granted)
+    running: Final = start(initial.state, "one", now=0)
+    uncertain: Final = quarantine(running, "one") if explicit else running
+    now: Final = cfg.heartbeat_timeout
+
+    assert isinstance(acquire(uncertain, cfg, owner, now=now), Denied)
+    other: Final = request("two").model_copy(update={"eligible": ("f",)})
+    assert isinstance(acquire(uncertain, cfg, other, now=now), Denied)
+    another: Final = acquire(uncertain, cfg, owner.model_copy(update={"operation": "next"}), now=now)
+    assert isinstance(another, Granted)
+    assert another.resource == "f"
+    assert isinstance(acquire(another.state, cfg, owner.model_copy(update={"operation": "extra"}), now=now), Denied)
+    late_pulse: Final = heartbeat(another.state, cfg, "one", now=now + 1)
+    ended: Final = complete(late_pulse, cfg, "next", now=now + 2)
+    extra: Final = acquire(ended, cfg, owner.model_copy(update={"operation": "extra"}), now=now + 3)
+    assert isinstance(extra, Granted) and extra.resource == "f"
+
+
+def test_quarantine_reservation_counts_only_in_its_normal_quota_window() -> None:
+    limits: Final = Limits(parallel=1, rpm=1, tpm=10)
+    cfg: Final = config().model_copy(
+        update={"client_limits": limits, "fallback": Resource(id="f", upstream_id="physical-f", limits=limits)}
+    )
+    owner: Final = request("one").model_copy(update={"eligible": ("f",)})
+    initial: Final = acquire(empty_state(cfg), cfg, owner, now=0)
+    assert isinstance(initial, Granted)
+    uncertain: Final = quarantine(start(initial.state, "one", now=0), "one")
+    retry: Final = owner.model_copy(update={"operation": "next"})
+
+    assert isinstance(acquire(uncertain, cfg, retry, now=59), Denied)
+    assert isinstance(acquire(uncertain, cfg, retry, now=60), Granted)
+    assert isinstance(acquire(sweep(uncertain, cfg, now=300), cfg, retry, now=300), Granted)
 
 
 def test_conservative_token_reservations_are_reconciled_from_usage() -> None:
