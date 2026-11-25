@@ -1,10 +1,18 @@
 model_list: []
-litellm_settings:
-  callbacks:
-    - litellm.router_utils.exclusive_pool.configured.callback
 router_settings:
   num_retries: 0
   disable_cooldowns: true
+  model_group_alias: &pool_model_aliases
+    claude/claude-haiku-5-5: claude-haiku-5-5
+    claude/claude-opus-5-5: claude-opus-5-5
+    claude/claude-sonnet-5-5: claude-sonnet-5-5
+    anthropic/claude-haiku-5-5: claude-haiku-5-5
+    anthropic/claude-opus-5-5: claude-opus-5-5
+    anthropic/claude-sonnet-5-5: claude-sonnet-5-5
+litellm_settings:
+  callbacks:
+    - litellm.router_utils.exclusive_pool.configured.callback
+  model_alias_map: *pool_model_aliases
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   store_model_in_db: true
