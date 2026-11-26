@@ -167,6 +167,7 @@ class ExclusiveEndpointPool(CustomLogger):
         )
         outcome: Final = await self.store.acquire(
             Admission(
+                model=model,
                 client=ticket.client,
                 device=ticket.device,
                 operation=ticket.operation,
@@ -218,6 +219,7 @@ class ExclusiveEndpointPool(CustomLogger):
                     request.counted_reservation(count, ticket.tokens),
                     ticket.limits,
                     now,
+                    model,
                 )
             )
             if isinstance(counted, Failure):

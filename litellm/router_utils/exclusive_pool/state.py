@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import reduce
-from typing import Final
+from typing import Final, Literal
 
 from .models import (
     Admission,
@@ -17,6 +17,7 @@ from .models import (
     PoolConfig,
     Resource,
     ResourceLimits,
+    RoutingCounters,
     Session,
     Snapshot,
 )
@@ -183,8 +184,33 @@ def _choose(
     )
 
 
+def catalog_is_current(state: Snapshot, config: PoolConfig, now: float) -> bool:
+    return not config.discovery or (
+        state.discovered_at is not None and now - state.discovered_at < config.heartbeat_timeout
+    )
+
+
+def _count_routing(state: Snapshot, model: str | None, field: Literal["fallback_transitions", "exhausted"]) -> Snapshot:
+    if model is None:
+        return state
+    previous: Final = next((counter for counter in state.routing_counters if counter.model == model), None)
+    counter: Final = previous or RoutingCounters(model=model)
+    return state.model_copy(
+        update={
+            "routing_counters": (
+                *tuple(item for item in state.routing_counters if item.model != model),
+                counter.model_copy(update={field: getattr(counter, field) + 1}),
+            )
+        }
+    )
+
+
+def _routing_model(config: PoolConfig, model: str | None) -> str | None:
+    return model if model in config.models else None
+
+
 def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float) -> Outcome:
-    if config.discovery and (state.discovered_at is None or now - state.discovered_at >= config.heartbeat_timeout):
+    if not catalog_is_current(state, config, now):
         return Denied(state=state, failure=unavailable())
     if state.fingerprint != config.fingerprint:
         return Denied(state=state, failure=unavailable())
@@ -220,7 +246,14 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         )
     resource: Final = _choose(current, config, request, session, now)
     if resource is None:
-        return Denied(state=state, failure=exhausted())
+        model: Final = _routing_model(config, request.model)
+        return Denied(state=_count_routing(state, model, "exhausted"), failure=exhausted())
+    fallback_transition: Final = (
+        config.is_fallback(resource.id)
+        and (session is None or session.resource is None or not config.is_fallback(session.resource))
+        and not request.requires_binding
+        and (session is None or session.pinned_upstream is None)
+    )
     bound: Final = Session(
         client=request.client,
         device=request.device,
@@ -239,6 +272,7 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         heartbeat=now,
         health_generation=next(h.generation for h in current.health if h.resource == resource.id),
         counted=not request.needs_count,
+        fallback_transition_model=_routing_model(config, request.model) if fallback_transition else None,
         pending_pin=resource.upstream_id if request.pin_upstream else None,
     )
     client_charge: Final = (
@@ -269,7 +303,13 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
 
 
 def reserve_counted_tokens(
-    state: Snapshot, config: PoolConfig, operation: str, tokens: int, limits: Limits | None, now: float
+    state: Snapshot,
+    config: PoolConfig,
+    operation: str,
+    tokens: int,
+    limits: Limits | None,
+    now: float,
+    model: str | None = None,
 ) -> Outcome:
     active: Final = next((op for op in state.operations if op.id == operation), None)
     if active is None or active.quarantined or active.started or now - active.heartbeat >= config.heartbeat_timeout:
@@ -298,7 +338,7 @@ def reserve_counted_tokens(
             ),
         )
     if not has_capacity(remaining, config, f"resource:{resource.scope}", resource.limits, tokens, now, operation):
-        return Denied(state=state, failure=exhausted())
+        return Denied(state=_count_routing(state, _routing_model(config, model), "exhausted"), failure=exhausted())
     return Granted(
         resource=active.resource,
         operation=active.id,
@@ -325,7 +365,10 @@ def start(state: Snapshot, operation: str, now: float) -> Snapshot:
         for s in state.sessions
     ):
         return state
-    return state.model_copy(
+    counted: Final = (
+        state if active.started else _count_routing(state, active.fallback_transition_model, "fallback_transitions")
+    )
+    return counted.model_copy(
         update={
             "sessions": tuple(
                 s.model_copy(update={"pinned_upstream": s.pinned_upstream or active.pending_pin})

@@ -186,6 +186,7 @@ class Operation(FrozenModel):
     quarantined: bool = False
     probe: bool = False
     health_generation: str = "initial"
+    fallback_transition_model: str | None = None
 
 
 class Charge(FrozenModel):
@@ -221,6 +222,12 @@ class CatalogEntry(FrozenModel):
     active: bool = True
 
 
+class RoutingCounters(FrozenModel):
+    model: str
+    fallback_transitions: int = 0
+    exhausted: int = 0
+
+
 class Snapshot(FrozenModel):
     fingerprint: str
     catalog: tuple[CatalogEntry, ...] = ()
@@ -232,9 +239,11 @@ class Snapshot(FrozenModel):
     charges: tuple[Charge, ...] = ()
     health: tuple[Health, ...] = ()
     events: tuple[Event, ...] = ()
+    routing_counters: tuple[RoutingCounters, ...] = ()
 
 
 class Admission(FrozenModel):
+    model: str | None = None
     needs_count: bool = False
     pin_upstream: bool = False
     requires_binding: bool = False

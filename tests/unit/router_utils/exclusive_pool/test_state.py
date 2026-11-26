@@ -358,3 +358,29 @@ def test_pending_server_context_cannot_start_after_parallel_failure_invalidates_
     assert counted.kind == "granted"
     assert start(counted.state, "tools", now=6) == counted.state
     assert counted.state.sessions[0].pinned_upstream is None
+
+
+def test_pool_metrics_track_capacity_and_routing_outcomes() -> None:
+    from litellm.router_utils.exclusive_pool.metrics import render_metrics
+
+    cfg: Final = config()
+    first: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)
+    first_done: Final = complete(start(first.state, "one", now=0), cfg, "one", now=1)
+    second: Final = acquire(first_done, cfg, request("two"), now=1)
+    second_done: Final = complete(start(second.state, "two", now=1), cfg, "two", now=2)
+    fallback: Final = acquire(second_done, cfg, request("three").model_copy(update={"model": "model"}), now=2)
+    before_start: Final = render_metrics(fallback.state, cfg, 2, 10)
+    assert 'exclusive_pool_fallback_transitions_total{model="model"} 0' in before_start
+
+    started: Final = start(fallback.state, "three", now=2)
+    repeated: Final = start(started, "three", now=3)
+    refused: Final = acquire(
+        repeated, cfg, request("four").model_copy(update={"eligible": ("a", "b"), "model": "model"}), now=4
+    )
+    assert isinstance(refused, Denied)
+    metrics: Final = render_metrics(refused.state, cfg, 4, 10)
+    assert 'exclusive_pool_primary_available{model="model"} 0' in metrics
+    assert 'exclusive_pool_fallback_available{model="model"} 1' in metrics
+    assert 'exclusive_pool_fallback_transitions_total{model="model"} 1' in metrics
+    assert 'exclusive_pool_endpoint_pool_exhausted_total{model="model"} 1' in metrics
+    assert 'exclusive_pool_primary_available{model="model"} 2' in render_metrics(refused.state, cfg, 903, 10)

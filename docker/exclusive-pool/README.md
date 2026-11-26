@@ -196,3 +196,9 @@ Use `cr.selcloud.ru/ttkdc/litellm:exclusive-pool-monthly-budget-20261113` for th
 Set an organization's `budget_reset_day` through the [organization API](../../docs/organization-monthly-budget.md). Existing schedules and pool configuration are preserved. Apply the included schema migration through the normal migration service before starting proxy workers
 
 Local verification used this directory's proxy and pool configuration with isolated PostgreSQL and Redis. The proxy started and `/health/liveliness` returned HTTP 200. Budget creation, schedule changes and disabling resets succeeded through `/budget/new` and `/budget/update`; invalid days returned 422 and unauthenticated requests returned 401. Organization HTTP writes require an Enterprise license, so their behavior was verified by the organization endpoint tests
+
+## Pool metrics
+
+The `monitoring` profile runs `pool-metrics` on `127.0.0.1:9101`. Mount a dedicated bearer token of at least 32 bytes at `./secrets/pool-metrics-token` before starting the service. For remote scraping, reverse proxy only `/metrics/exclusive-pool` over the private monitoring link with TLS. Keep the token outside Git
+
+Set `EXCLUSIVE_POOL_METRICS_REQUEST_TOKENS` to the representative total request reservation used to estimate available capacity. The default is 10,000 tokens. Set `EXCLUSIVE_POOL_METRICS_REDIS_URL` to use a separate Redis user with GET access to the pool state key. Use the same pool config and LiteLLM image for the proxy and exporter. See the [monitoring design](../../docs/superpowers/specs/2026-11-26-exclusive-pool-monitoring-design.md) for the scrape and alert contract

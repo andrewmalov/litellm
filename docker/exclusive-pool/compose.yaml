@@ -75,6 +75,32 @@ services:
       redis:
         condition: service_healthy
 
+  pool-metrics:
+    <<: *image
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    init: true
+    entrypoint: ["python", "-m", "uvicorn"]
+    command: ["litellm.router_utils.exclusive_pool.metrics:create_app", "--factory", "--host", "0.0.0.0", "--port", "9101"]
+    environment:
+      <<: *pool-environment
+      EXCLUSIVE_POOL_REDIS_URL: ${EXCLUSIVE_POOL_METRICS_REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
+      EXCLUSIVE_POOL_METRICS_TOKEN_FILE: /run/secrets/pool-metrics-token
+      EXCLUSIVE_POOL_METRICS_REQUEST_TOKENS: ${EXCLUSIVE_POOL_METRICS_REQUEST_TOKENS:-10000}
+    volumes:
+      - ./pool.json:/etc/litellm/pool.json:ro
+      - type: bind
+        source: ./secrets/pool-metrics-token
+        target: /run/secrets/pool-metrics-token
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "127.0.0.1:9101:9101"
+    depends_on:
+      redis:
+        condition: service_healthy
+
   redis:
     image: redis:7.4.12-alpine@sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f
     restart: unless-stopped
