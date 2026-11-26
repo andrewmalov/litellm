@@ -16,6 +16,7 @@ from .models import (
     Outcome,
     PoolConfig,
     Resource,
+    ResourceLimits,
     Session,
     Snapshot,
 )
@@ -69,7 +70,13 @@ def _charges(state: Snapshot, scope: str) -> tuple[Charge, ...]:
 
 
 def has_capacity(
-    state: Snapshot, config: PoolConfig, scope: str, limits: Limits, tokens: int, now: float, logical: str
+    state: Snapshot,
+    config: PoolConfig,
+    scope: str,
+    limits: ResourceLimits | Limits,
+    tokens: int,
+    now: float,
+    logical: str,
 ) -> bool:
     uncertain: Final = frozenset(
         op.logical if scope == f"client:{op.client}" else op.id
@@ -98,11 +105,12 @@ def _resource_available(
     state: Snapshot, config: PoolConfig, resource: Resource, request: Admission, now: float
 ) -> bool:
     health: Final = next(h for h in state.health if h.resource == resource.id)
-    operations: Final = _scope_operations(state, config, resource)
     if resource.id not in request.eligible or health.status != "ready":
         return False
-    parallel: Final = sum(in_flight(op, config, now) for op in operations)
-    if parallel >= min(resource.limits.parallel, health.capacity or resource.limits.parallel):
+    limit: Final = resource.limits.parallel
+    if limit is not None and sum(
+        in_flight(op, config, now) for op in _scope_operations(state, config, resource)
+    ) >= min(limit, health.capacity or limit):
         return False
     upstream_ids: Final = config.upstream_deployments(resource.upstream_id)
     exclusive: Final = not config.is_fallback(resource.id)
@@ -112,7 +120,7 @@ def _resource_available(
         op.resource in upstream_ids
         and not op.probe
         and op.client != request.client
-        and (exclusive or not in_flight(op, config, now))
+        and (exclusive or (limit is not None and not in_flight(op, config, now)))
         for op in state.operations
     ):
         return False
@@ -133,7 +141,8 @@ def _ordered_primaries(state: Snapshot, config: PoolConfig) -> tuple[Resource, .
 def _choose(
     state: Snapshot, config: PoolConfig, request: Admission, session: Session | None, now: float
 ) -> Resource | None:
-    active: Final = any(in_flight(op, config, now) for op in _active(state, request.client))
+    operations: Final = _active(state, request.client)
+    active: Final = any(in_flight(op, config, now) for op in operations)
     if session is not None and session.resource is None and active:
         return None
     if session is not None and session.pinned_upstream is not None:
@@ -146,13 +155,23 @@ def _choose(
             None,
         )
     previous: Final = next((r for r in config.resources if session is not None and r.id == session.resource), None)
-    if previous is not None:
+    prefer_primary: Final = (
+        previous is not None
+        and any(r.upstream_id == previous.upstream_id for r in config.fallbacks)
+        and not operations
+        and not request.requires_binding
+    )
+    if previous is not None and not prefer_primary:
         siblings: Final = tuple(r for r in config.selectable if r.upstream_id == previous.upstream_id)
         selected: Final = next((r for r in siblings if _resource_available(state, config, r, request, now)), None)
         if selected is not None:
             return selected
         sibling_ids: Final = frozenset(r.id for r in siblings)
-        if any(h.status == "ready" and h.resource in sibling_ids for h in state.health) or active:
+        if (
+            request.requires_binding
+            or any(h.status == "ready" and h.resource in sibling_ids for h in state.health)
+            or active
+        ):
             return None
     return next(
         (
@@ -418,11 +437,12 @@ def _successful_health(
     if health.resource not in upstream_ids or health.status != "ready" or operation.probe:
         return health
     successful_since: Final = health.success_since if health.success_since is not None else now
+    limit: Final = resource.limits.parallel
     return health.model_copy(
         update={
             "success_since": successful_since,
             "cycles": 0 if now - successful_since >= 300 else health.cycles,
-            "capacity": min(resource.limits.parallel, health.capacity + 1) if health.capacity is not None else None,
+            "capacity": min(limit, health.capacity + 1) if limit is not None and health.capacity is not None else None,
         }
     )
 

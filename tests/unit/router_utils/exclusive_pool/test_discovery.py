@@ -137,6 +137,20 @@ def test_fallback_models_share_one_physical_reserve() -> None:
     assert not isinstance(third, Granted)
 
 
+def test_existing_fallback_can_switch_to_unlimited_without_replacing_its_deployments() -> None:
+    config: Final = _config()
+    rows: Final = _upstream_rows("f", "fallback", metadata={"exclusive_pool_limits": {"parallel": 1}})
+    initial: Final = _reconcile(empty_state(config), config, rows, 1)
+    first: Final = _admit(initial, "one", "opus", "first")
+    assert isinstance(first, Granted)
+    unlimited: Final = _upstream_rows("f", "fallback", metadata={"exclusive_pool_limits": {"parallel": None}})
+    updated: Final = _reconcile(first.state, config, unlimited, 3)
+    second: Final = _admit(updated, "two", "sonnet", "second", 4)
+    assert isinstance(second, Granted) and second.resource == "f-sonnet"
+    restored: Final = _reconcile(second.state, config, rows, 5)
+    assert not isinstance(_admit(restored, "three", "haiku", "third", 6), Granted)
+
+
 @pytest.mark.parametrize(
     "metadata",
     [

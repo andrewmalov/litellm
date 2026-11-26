@@ -21,6 +21,8 @@ The database supplies membership. `model_info.exclusive_pool` must exactly match
 
 Default resource limits come from `primary_limits` and `fallback_limits` in `pool.json`. The proxy binds to `127.0.0.1:4000` by default. Use an authenticated TLS reverse proxy for remote access. Neither Redis nor PostgreSQL publishes a host port. Redis uses AOF fsync on every write, no eviction and a 256 MB key-memory limit. Monitor disk space and write failures
 
+Use a proxy and pool-admin image that supports `fallback_limits.parallel: null` before applying a config with that value. Older images require a positive integer. With `null`, the fallback accepts concurrent requests across keys without a pool-wide parallel cap. RPM, TPM and per-key limits still apply. Once an unpinned key has finished its work on fallback, its next request prefers an available primary for that model. Account-bound sessions stay on their upstream
+
 ## First start
 
 Validate privately without rendering interpolated secrets. The configured image must contain discovery support:
@@ -129,7 +131,7 @@ docker compose run --rm pool-admin enable --resource DEPLOYMENT_ID
 
 Normal model additions, removals and blocking use the standard API/UI without restarting. Deleted or blocked resources stop receiving new admissions after discovery. Their operations, uncertain completions, health and quota charges remain in Redis. Re-adding the same ID preserves that history. Retired deployments remain protected against direct-ID calls
 
-Retired catalog records are retained for safety. For a registered ID, the public model name, role, upstream identity, quota scope and limits are immutable in discovery. Restore the original metadata if an edit prevents synchronization. Keys can rotate without changing those fields. Drain all work and verify the upstream is idle before repointing a deployment at another physical resource
+Retired catalog records are retained for safety. For a registered ID, the public model name, role, upstream identity, quota scope and limits are immutable in discovery except for the fallback parallel limit. An explicit `exclusive_pool_limits` override takes precedence over `fallback_limits`. Set the same effective limits on every model alias of the fallback. Restore the original metadata if an edit prevents synchronization. Keys can rotate without changing those fields. Drain all work and verify the upstream is idle before repointing a deployment at another physical resource
 
 Discovery reads the writer database. A failed DB read or malformed pool metadata does not become an empty catalog. Protected requests fail closed when required synchronization fails. No new admissions or probes occur once the catalog is older than `heartbeat_timeout`. Unrelated models continue serving independently
 

@@ -91,15 +91,66 @@ def test_unsent_failure_rolls_back_new_bindings_without_refreshing_existing_bind
     assert rejected.operations == ()
 
 
-def test_full_fallback_does_not_migrate_an_idle_bound_client_to_a_free_primary() -> None:
+def test_backup_client_returns_to_a_free_primary_after_its_last_request() -> None:
     cfg: Final = config()
     first: Final = acquire(empty_state(cfg), cfg, request("one"), now=0)
     second: Final = acquire(first.state, cfg, request("two"), now=0)
-    fallback: Final = acquire(second.state, cfg, request("three"), now=100)
-    settled: Final = complete(complete(fallback.state, cfg, "one", now=0), cfg, "two", now=0)
-    other: Final = acquire(settled, cfg, request("four"), now=100)
-    full: Final = acquire(other.state, cfg, request("three", operation="again"), now=901)
-    assert full.failure.code == "endpoint_pool_exhausted"
+    settled: Final = complete(complete(second.state, cfg, "one", now=0), cfg, "two", now=0)
+    fallback: Final = acquire(settled, cfg, request("three"), now=880)
+    assert isinstance(fallback, Granted) and fallback.resource == "f"
+    concurrent: Final = acquire(fallback.state, cfg, request("three", operation="parallel"), now=901)
+    assert isinstance(concurrent, Granted) and concurrent.resource == "f"
+    ended: Final = complete(complete(concurrent.state, cfg, "three", now=902), cfg, "parallel", now=903)
+    promoted: Final = acquire(ended, cfg, request("three", operation="again"), now=904)
+    assert isinstance(promoted, Granted) and promoted.resource == "a"
+    other: Final = acquire(promoted.state, cfg, request("four").model_copy(update={"eligible": ("a", "f")}), now=904)
+    assert isinstance(other, Granted) and other.resource == "f"
+
+
+def test_backup_server_reference_stays_on_its_original_upstream() -> None:
+    cfg: Final = config()
+    initial: Final = request("one").model_copy(update={"eligible": ("f",), "pin_upstream": True})
+    backup: Final = acquire(empty_state(cfg), cfg, initial, now=0)
+    assert isinstance(backup, Granted) and backup.resource == "f"
+    ended: Final = complete(start(backup.state, "one", now=0), cfg, "one", now=1)
+    followup: Final = request("one", operation="next").model_copy(update={"requires_binding": True})
+    retained: Final = acquire(ended, cfg, followup, now=2)
+    assert isinstance(retained, Granted) and retained.resource == "f"
+
+
+def test_unlimited_backup_admits_multiple_keys_after_recovery_even_with_quarantine() -> None:
+    from litellm.router_utils.exclusive_pool.recovery import ErrorPolicy, claim_probe, fail, probe_success
+
+    defaults: Final = config()
+    cfg: Final = PoolConfig.model_validate(
+        {**defaults.model_dump(), "fallback": {"id": "f", "upstream_id": "physical-f", "limits": {"parallel": None}}}
+    )
+    on_backup: Final = request("first").model_copy(update={"eligible": ("f",)})
+    first: Final = acquire(empty_state(cfg), cfg, on_backup, now=0)
+    assert isinstance(first, Granted)
+    cooled: Final = fail(
+        start(first.state, "first", now=0),
+        cfg,
+        "first",
+        ErrorPolicy(kind="cooldown", confirmed_end=True),
+        now=1,
+        jitter=0,
+    )
+    probe: Final = claim_probe(cooled, cfg, "f", "probe", now=17)
+    assert isinstance(probe, Granted)
+    ready: Final = probe_success(probe.state, cfg, "probe", now=18)
+    uncertain: Final = acquire(ready, cfg, on_backup.model_copy(update={"operation": "stale"}), now=19)
+    assert isinstance(uncertain, Granted)
+    quarantined: Final = quarantine(start(uncertain.state, "stale", now=19), "stale")
+    replies: Final = tuple(
+        request(key).model_copy(update={"eligible": ("f",)}) for key in ("second", "third", "fourth")
+    )
+    first_shared: Final = acquire(quarantined, cfg, replies[0], now=20)
+    second_shared: Final = acquire(first_shared.state, cfg, replies[1], now=20)
+    third_shared: Final = acquire(second_shared.state, cfg, replies[2], now=20)
+    assert all(
+        isinstance(result, Granted) and result.resource == "f" for result in (first_shared, second_shared, third_shared)
+    )
 
 
 def test_stale_operation_allows_the_owner_before_expiry_and_reassignment_after_expiry() -> None:

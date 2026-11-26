@@ -5,7 +5,7 @@ from typing import Final, Literal
 
 from pydantic import Field, TypeAdapter, ValidationError, field_validator
 
-from .models import CatalogEntry, Failure, FrozenModel, Health, Limits, PoolConfig, Resource, Snapshot
+from .models import CatalogEntry, Failure, FrozenModel, Health, PoolConfig, Resource, ResourceLimits, Snapshot
 from .state import unavailable
 
 _METADATA: Final = TypeAdapter(Mapping[str, object])
@@ -29,7 +29,7 @@ class _Labels(FrozenModel):
     exclusive_pool_role: Literal["primary", "fallback"]
     exclusive_upstream_id: str | None = Field(default=None, min_length=1)
     exclusive_quota_scope: str | None = Field(default=None, min_length=1)
-    exclusive_pool_limits: Limits | None = None
+    exclusive_pool_limits: ResourceLimits | None = None
 
 
 def _entry(row: CatalogRow, config: PoolConfig) -> CatalogEntry:
@@ -55,6 +55,8 @@ def discover(rows: tuple[CatalogRow, ...], config: PoolConfig) -> tuple[CatalogE
         )
         if len(frozenset(e.resource.id for e in entries)) != len(entries):
             return unavailable()
+        if any(entry.role == "primary" and entry.resource.limits.parallel is None for entry in entries):
+            return unavailable()
         if (
             len(frozenset(entry.resource.upstream_id for entry in entries if entry.active and entry.role == "fallback"))
             > 1
@@ -73,13 +75,14 @@ def reconcile(
     incoming: Final = {entry.resource.id: entry for entry in catalog}
     previous: Final = {entry.resource.id: entry for entry in snapshot.catalog}
     if any(
-        entry.model_copy(update={"active": True}) != previous[entry.resource.id].model_copy(update={"active": True})
-        for entry in catalog
-        if entry.resource.id in previous
+        not _compatible_update(entry, previous[entry.resource.id]) for entry in catalog if entry.resource.id in previous
     ):
         return unavailable()
+    fallback_by_upstream: Final = {entry.resource.upstream_id: entry for entry in catalog if entry.role == "fallback"}
     retained: Final = tuple(
-        entry.model_copy(update={"active": False}) for entry in snapshot.catalog if entry.resource.id not in incoming
+        _retire(entry, fallback_by_upstream.get(entry.resource.upstream_id))
+        for entry in snapshot.catalog
+        if entry.resource.id not in incoming
     )
     combined: Final = tuple(sorted((*catalog, *retained), key=lambda entry: entry.resource.id))
     if any(not _consistent_role(entry, combined) for entry in combined):
@@ -97,6 +100,31 @@ def reconcile(
     except ValidationError:
         return unavailable()
     return updated
+
+
+def _compatible_update(entry: CatalogEntry, previous: CatalogEntry) -> bool:
+    original: Final = previous.model_copy(update={"active": entry.active})
+    if entry.role == "fallback" and previous.role == "fallback":
+        return (
+            entry.model_dump()
+            == original.model_copy(
+                update={"resource": _with_parallel(previous.resource, entry.resource.limits.parallel)}
+            ).model_dump()
+        )
+    return entry.model_dump() == original.model_dump()
+
+
+def _with_parallel(resource: Resource, parallel: int | None) -> Resource:
+    return resource.model_copy(update={"limits": resource.limits.model_copy(update={"parallel": parallel})})
+
+
+def _retire(entry: CatalogEntry, fallback: CatalogEntry | None) -> CatalogEntry:
+    resource: Final = (
+        _with_parallel(entry.resource, fallback.resource.limits.parallel)
+        if entry.role == "fallback" and fallback is not None
+        else entry.resource
+    )
+    return entry.model_copy(update={"active": False, "resource": resource})
 
 
 def _consistent_role(entry: CatalogEntry, catalog: tuple[CatalogEntry, ...]) -> bool:

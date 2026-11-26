@@ -255,7 +255,7 @@ def probe_success(state: Snapshot, config: PoolConfig, operation: str, now: floa
                     update={
                         "status": "ready",
                         "success_since": now,
-                        "capacity": 1 if fallback else None,
+                        "capacity": 1 if fallback and target.limits.parallel is not None else None,
                     }
                 )
                 if h.resource in upstream_ids

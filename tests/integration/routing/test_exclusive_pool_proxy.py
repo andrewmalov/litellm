@@ -450,6 +450,10 @@ def test_standard_model_api_addition_and_removal_update_pool_without_restart(rig
     try:
         initial: Final = tuple(rig.chat(key, "device") for key in keys[:2])
         assert tuple(reply.status_code for reply in initial) == (200, 200), tuple(reply.text for reply in initial)
+        assert rig.config.fallback is not None
+        on_backup: Final = rig.chat(keys[2], "device")
+        assert on_backup.status_code == 200, on_backup.text
+        assert on_backup.headers["x-litellm-model-id"] == rig.config.fallback.id
         rig.proxy.post(
             "/model/new",
             {
@@ -473,8 +477,11 @@ def test_standard_model_api_addition_and_removal_update_pool_without_restart(rig
             lambda: Snapshot.model_validate_json(redis.get(state_key)),
             lambda snapshot: any(entry.resource.id == identifier and entry.active for entry in snapshot.catalog),
         )
-        added: Final = eventually(lambda: rig.chat(keys[2], "device"), lambda reply: reply.status_code == 200)
-        assert added.headers["x-litellm-model-id"] == identifier, added.text
+        added: Final = eventually(
+            lambda: rig.chat(keys[2], "device"),
+            lambda reply: reply.status_code == 200 and reply.headers.get("x-litellm-model-id") == identifier,
+        )
+        assert added.status_code == 200, added.text
         sticky: Final = rig.chat(keys[0], "device")
         assert (
             sticky.status_code == 200
@@ -487,7 +494,6 @@ def test_standard_model_api_addition_and_removal_update_pool_without_restart(rig
         )
         moved: Final = rig.chat(keys[2], "device")
         assert moved.status_code == 200, moved.text
-        assert rig.config.fallback is not None
         assert moved.headers["x-litellm-model-id"] == rig.config.fallback.id
         changed: Final = rig.chat(keys[2], "another-device")
         assert changed.status_code == 200, changed.text

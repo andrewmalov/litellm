@@ -18,11 +18,17 @@ class Limits(FrozenModel):
     tpm: Annotated[int, Field(gt=0)] = 60000
 
 
+class ResourceLimits(FrozenModel):
+    parallel: Annotated[int, Field(gt=0)] | None = 4
+    rpm: Annotated[int, Field(gt=0)] = 60
+    tpm: Annotated[int, Field(gt=0)] = 60000
+
+
 class Resource(FrozenModel):
     id: Annotated[str, Field(min_length=1)]
     upstream_id: Annotated[str, Field(min_length=1)]
     quota_scope: str | None = None
-    limits: Limits = Field(default_factory=Limits)
+    limits: ResourceLimits | Limits = Field(default_factory=ResourceLimits)
 
     @property
     def scope(self) -> str:
@@ -37,7 +43,7 @@ class PoolConfig(FrozenModel):
     fallback_aliases: tuple[Resource, ...] = ()
     discovery: bool = False
     primary_limits: Limits = Field(default_factory=Limits)
-    fallback_limits: Limits = Field(default_factory=Limits)
+    fallback_limits: ResourceLimits | Limits = Field(default_factory=ResourceLimits)
     retired: tuple[Resource, ...] = ()
     client_limits: Limits
     output_tokens: Annotated[int, Field(gt=0)] = 256
@@ -101,6 +107,9 @@ class PoolConfig(FrozenModel):
             "physical upstream policy differs"
         )
         assert len(frozenset(r.upstream_id for r in self.fallbacks)) <= 1, "only one physical fallback is supported"
+        assert all(resource.limits.parallel is not None for resource in self.primaries), (
+            "only fallback resources support unlimited parallel requests"
+        )
         assert self.heartbeat_timeout > self.heartbeat_seconds, "heartbeat timeout must exceed its interval"
         assert all(_same_scope_limits(resource, self.resources) for resource in self.resources), (
             "shared quota limits differ"
@@ -124,12 +133,16 @@ class PoolConfig(FrozenModel):
 
 
 def _same_scope_limits(resource: Resource, resources: tuple[Resource, ...]) -> bool:
-    return all(other.limits == resource.limits for other in resources if other.scope == resource.scope)
+    return all(
+        other.limits.model_dump() == resource.limits.model_dump()
+        for other in resources
+        if other.scope == resource.scope
+    )
 
 
 def _same_upstream_policy(resource: Resource, resources: tuple[Resource, ...]) -> bool:
     return all(
-        (other.scope, other.limits) == (resource.scope, resource.limits)
+        (other.scope, other.limits.model_dump()) == (resource.scope, resource.limits.model_dump())
         for other in resources
         if other.upstream_id == resource.upstream_id
     )

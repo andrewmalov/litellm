@@ -9,6 +9,7 @@ import pytest_asyncio
 from redis.asyncio import Redis
 
 from litellm.router_utils.exclusive_pool.models import Admission, Denied, Failure, Granted, Limits, PoolConfig, Resource
+from litellm.router_utils.exclusive_pool.state import complete
 from litellm.router_utils.exclusive_pool.store import RedisPoolStore
 
 
@@ -104,6 +105,29 @@ async def test_independent_coordinators_cannot_give_a_primary_to_two_keys(store:
     assert sum(isinstance(reply, Granted) and reply.resource == "a" for reply in replies) == 1
     assert sum(isinstance(reply, Granted) and reply.resource == "b" for reply in replies) == 1
     assert sum(isinstance(reply, Granted) and reply.resource == "f" for reply in replies) == 10
+
+
+@pytest.mark.asyncio
+async def test_backup_keys_race_for_one_free_primary_across_coordinators(store: RedisPoolStore) -> None:
+    peer: Final = RedisPoolStore(store.redis, store.config)
+
+    def request(client: str, operation: str, eligible: tuple[str, ...] = ("a", "f")) -> Admission:
+        return Admission(client=client, device="d", operation=operation, tokens=1, eligible=eligible)
+
+    async def bind_backup(key: str) -> None:
+        result: Final = await store.acquire(request(key, key, ("f",)))
+        assert isinstance(result, Granted) and result.resource == "f"
+        ended: Final = await store.transact(lambda snapshot, now: complete(snapshot, store.config, key, now))
+        assert not isinstance(ended, Failure)
+
+    await bind_backup("left")
+    await bind_backup("right")
+    results: Final = await asyncio.gather(
+        store.acquire(request("left", "left-next")),
+        peer.acquire(request("right", "right-next")),
+    )
+    assert all(isinstance(result, Granted) for result in results)
+    assert frozenset(result.resource for result in results if isinstance(result, Granted)) == frozenset(("a", "f"))
 
 
 @pytest.mark.asyncio
