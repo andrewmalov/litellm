@@ -15,6 +15,7 @@ from litellm.types.utils import SelectTokenizerResponse
 from litellm.utils import huggingface_tokenizer_kind
 
 from .models import Failure, FrozenModel
+from .request import ANTHROPIC_SERVER_REFERENCE_BLOCKS
 
 if TYPE_CHECKING:
     from .request import RequestView
@@ -32,8 +33,10 @@ def has_reference(value: JsonValue) -> bool:
     if not isinstance(value, dict):
         return False
     kind: Final = value.get("type")
-    if kind in ("container_upload", "server_tool_use") or (isinstance(kind, str) and kind.endswith("_tool_result")):
+    if isinstance(kind, str) and kind in ANTHROPIC_SERVER_REFERENCE_BLOCKS:
         return True
+    if kind == "compaction":
+        return bool(value.get("encrypted_content") or value.get("signature"))
     if kind == "tool_result":
         return has_reference(value.get("content"))
     source: Final = value.get("source")

@@ -13,6 +13,25 @@ from litellm.types.utils import CallTypes, ModelResponseStream
 from .models import Failure, FrozenModel, Limits
 
 TICKET_KEY: Final = "exclusive_endpoint_pool"
+ANTHROPIC_SERVER_REFERENCE_BLOCKS: Final = frozenset(
+    {
+        "advisor_tool_result",
+        "bash_code_execution_tool_result",
+        "code_execution_tool_result",
+        "container_upload",
+        "mcp_tool_listing",
+        "mcp_tool_result",
+        "mcp_tool_use",
+        "server_tool_use",
+        "text_editor_code_execution_tool_result",
+        "tool_search_tool_result",
+        "web_fetch_tool_result",
+        "web_search_tool_result",
+    }
+)
+_SYSTEM_BLOCKS: Final = ("text", "tool_addition", "tool_removal")
+_TOOL_RESULT_BLOCKS: Final = ("text", "image", "document", "search_result", "tool_reference", "browser_state")
+_EFFORT_LEVELS: Final = ("low", "medium", "high", "xhigh", "max")
 
 
 class Ticket(FrozenModel):
@@ -60,6 +79,7 @@ class RequestView(FrozenModel):
     container: JsonValue = None
     messages: tuple[Mapping[str, JsonValue], ...] = ()
     tools: tuple[Mapping[str, JsonValue], ...] = ()
+    mcp_servers: JsonValue = None
     functions: tuple[Mapping[str, JsonValue], ...] = ()
     response_format: Mapping[str, JsonValue] | None = None
     output_config: Mapping[str, JsonValue] | None = None
@@ -87,7 +107,7 @@ class RequestView(FrozenModel):
             return False
         if call_type in ("anthropic_messages", "aanthropic_messages"):
             return (self.container is None or isinstance(self.container, (str, dict))) and all(
-                _supported_content(message.get("content")) for message in self.messages
+                _supported_anthropic_message(message) for message in self.messages
             )
         return call_type in ("completion", "acompletion") and self.text_only
 
@@ -108,6 +128,7 @@ class RequestView(FrozenModel):
         return (
             self.requires_binding
             or self.container is not None
+            or bool(self.mcp_servers)
             or any(not client_tool(tool.get("type")) for tool in self.tools)
         )
 
@@ -121,30 +142,53 @@ class RequestView(FrozenModel):
         return verified_ticket(self.metadata.get(TICKET_KEY, self.litellm_metadata.get(TICKET_KEY)), secret)
 
 
-def _supported_content(content: JsonValue) -> bool:
+def _supported_anthropic_message(message: Mapping[str, JsonValue]) -> bool:
+    role: Final = message.get("role")
+    content: Final = message.get("content")
+    if role == "system":
+        if "content" not in message or content == []:
+            output_config: Final = message.get("output_config")
+            return isinstance(output_config, dict) and output_config.get("effort") in _EFFORT_LEVELS
+        return _supported_content(content, _SYSTEM_BLOCKS)
+    return role in ("user", "assistant") and _supported_content(content)
+
+
+def _supported_content(content: JsonValue, allowed: tuple[str, ...] | None = None) -> bool:
     if isinstance(content, str):
         return True
     if not isinstance(content, list) or not content:
         return False
-    return all(_supported_block(block) for block in content)
+    return all(isinstance(block, dict) and _supported_block(block, allowed) for block in content)
 
 
-def _supported_block(block: JsonValue) -> bool:
-    if not isinstance(block, dict):
+def _supported_block(block: Mapping[str, JsonValue], allowed: tuple[str, ...] | None) -> bool:
+    kind: Final = block.get("type")
+    if allowed is not None and kind not in allowed:
         return False
-    match block.get("type"):
-        case "text" | "tool_use" | "tool_reference" | "thinking" | "redacted_thinking":
+    match kind:
+        case "text":
+            text: Final = block.get("text")
+            return isinstance(text, str) and bool(text)
+        case "tool_use" | "tool_reference" | "thinking" | "redacted_thinking" | "fallback":
             return True
         case "tool_addition" | "tool_removal":
-            return isinstance(block.get("tool"), dict)
+            return allowed == _SYSTEM_BLOCKS and isinstance(block.get("tool"), dict)
         case "image" | "document":
             source: Final = block.get("source")
             return isinstance(source, dict) and source.get("type") in ("base64", "url", "text", "content", "file")
-        case "container_upload" | "server_tool_use":
-            return True
-        case "tool_result":
-            return "content" not in block or block.get("content") == [] or _supported_content(block.get("content"))
-        case str() as kind if kind.endswith("_tool_result"):
+        case "search_result":
+            results: Final = block.get("content")
+            return isinstance(results, list) and (not results or _supported_content(results, ("text",)))
+        case "compaction":
+            summary: Final = block.get("content")
+            return summary is None or isinstance(summary, str) and bool(summary)
+        case "browser_state":
+            return allowed == _TOOL_RESULT_BLOCKS and isinstance(block.get("tabs"), list)
+        case "tool_result" | "mcp_tool_result":
+            nested_types: Final = ("text",) if kind == "mcp_tool_result" else _TOOL_RESULT_BLOCKS
+            nested: Final = block.get("content")
+            return "content" not in block or nested == [] or _supported_content(nested, nested_types)
+        case str() if kind in ANTHROPIC_SERVER_REFERENCE_BLOCKS:
             return True
         case _:
             return False

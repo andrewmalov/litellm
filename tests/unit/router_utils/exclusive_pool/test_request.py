@@ -145,6 +145,124 @@ def test_anthropic_system_prompt_is_included_in_token_reservation() -> None:
     assert _estimate(long) > _estimate(short)
 
 
+@pytest.mark.parametrize("content_fields", ({"content": []}, {}))
+def test_anthropic_effort_only_message_is_admitted(content_fields: dict[str, object]) -> None:
+    turn: Final = {"role": "system", **content_fields}
+    request: Final = RequestView.model_validate(
+        {"model": "alias", "messages": [{"role": "user", "content": "hello"}, turn]}
+    )
+    assert not request.supports("anthropic_messages")
+    with_effort: Final = RequestView.model_validate(
+        {**request.model_dump(), "messages": [request.messages[0], {**turn, "output_config": {"effort": "high"}}]}
+    )
+    assert with_effort.supports("anthropic_messages")
+    assert _estimate(with_effort) > 0
+    assert not with_effort.pin_upstream
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        {"role": "unknown", "content": "hello"},
+        {"role": "user", "content": [], "output_config": {"effort": "high"}},
+        {"role": "system", "content": [], "output_config": {}},
+        {"role": "system", "content": [], "output_config": {"effort": 1}},
+        {"role": "system", "content": [{"type": "image", "source": {"type": "url", "url": "https://example.test"}}]},
+        {"role": "user", "content": [{"type": "text"}]},
+        {"role": "user", "content": [{"type": "browser_state", "tabs": []}]},
+        {"role": "user", "content": [{"type": "tool_removal", "tool": {"type": "tool_reference", "name": "lookup"}}]},
+        {"role": "assistant", "content": [{"type": "unrecognized_tool_result"}]},
+    ),
+)
+def test_anthropic_invalid_messages_are_rejected_before_admission(message: dict[str, object]) -> None:
+    request: Final = RequestView.model_validate({"model": "alias", "messages": [message]})
+    assert not request.supports("anthropic_messages")
+
+
+@pytest.mark.parametrize(
+    ("message", "requires_binding"),
+    (
+        (
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "search_result",
+                        "source": "urn:example",
+                        "title": "Example",
+                        "content": [{"type": "text", "text": "result"}],
+                    }
+                ],
+            },
+            False,
+        ),
+        ({"role": "assistant", "content": [{"type": "compaction", "content": None}]}, False),
+        (
+            {
+                "role": "assistant",
+                "content": [{"type": "compaction", "content": "summary", "encrypted_content": "opaque"}],
+            },
+            True,
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "mcp_tool_use", "id": "mcp-1", "server_name": "demo", "name": "lookup", "input": {}},
+                    {"type": "mcp_tool_result", "tool_use_id": "mcp-1", "content": "result"},
+                    {"type": "mcp_tool_listing", "mcp_server_name": "demo", "tools": []},
+                ],
+            },
+            True,
+        ),
+        (
+            {"role": "assistant", "content": [{"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}}]},
+            False,
+        ),
+        (
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool-1",
+                        "content": [{"type": "browser_state", "tabs": []}],
+                    },
+                ],
+            },
+            False,
+        ),
+    ),
+)
+def test_anthropic_history_blocks_are_admitted_with_expected_affinity(
+    message: dict[str, object], requires_binding: bool
+) -> None:
+    request: Final = RequestView.model_validate(
+        {"model": "alias", "messages": [{"role": "user", "content": "hello"}, message]}
+    )
+    assert request.supports("anthropic_messages")
+    assert request.requires_binding is requires_binding
+    assert _estimate(request) > 0
+
+
+@pytest.mark.parametrize("kind", ("search_result", "compaction", "mcp_tool_result"))
+def test_anthropic_history_estimate_grows_with_text(kind: str) -> None:
+    def request(text: str) -> RequestView:
+        block: Final = (
+            {"type": kind, "source": "urn:example", "title": "Example", "content": [{"type": "text", "text": text}]}
+            if kind == "search_result"
+            else {"type": kind, "content": text, **({"tool_use_id": "mcp-1"} if kind == "mcp_tool_result" else {})}
+        )
+        return RequestView.model_validate(
+            {
+                "model": "alias",
+                "messages": [{"role": "user" if kind == "search_result" else "assistant", "content": [block]}],
+            }
+        )
+
+    assert _estimate(request("result " * 5000)) > _estimate(request("result"))
+
+
 @pytest.mark.parametrize("action", ("tool_addition", "tool_removal"))
 def test_anthropic_tool_changes_are_admitted_and_counted(action: str) -> None:
     def request(value: str) -> RequestView:

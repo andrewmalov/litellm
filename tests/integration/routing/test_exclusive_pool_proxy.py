@@ -743,6 +743,31 @@ def test_messages_large_text_is_estimated_locally_on_the_assigned_upstream(rig: 
 
 
 @pytest.mark.parametrize("rig", ["anthropic"], indirect=True)
+def test_messages_effort_only_turn_reaches_native_upstream_unchanged(rig: Rig) -> None:
+    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    beta: Final = "per-turn-control-2026-07-01"
+    messages: Final[list[JsonValue]] = [
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+        {"role": "system", "content": [], "output_config": {"effort": "high"}},
+    ]
+    try:
+        rig.stream_release.set()
+        response: Final = rig.proxy.request(
+            "POST",
+            "/v1/messages?beta=true",
+            {"model": rig.config.models[0], "max_tokens": 16, "messages": messages, "stream": True},
+            key=key,
+            headers={"anthropic-beta": beta},
+        )
+        assert response.status_code == 200, response.text
+        assert "event: message_stop" in response.text
+        assert rig.payloads.get(timeout=5)["messages"] == messages
+        assert beta in rig.generation_betas.get(timeout=5)
+    finally:
+        rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize("rig", ["anthropic"], indirect=True)
 def test_messages_tool_changes_reach_native_upstream_with_beta_headers(rig: Rig) -> None:
     key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
     inline_beta: Final = "inline-tools-2026-09-15"

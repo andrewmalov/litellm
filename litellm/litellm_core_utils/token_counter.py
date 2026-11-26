@@ -14,7 +14,7 @@ import anyio.lowlevel
 import httpx
 import tiktoken
 from pydantic import JsonValue
-from typing_extensions import ParamSpec, ReadOnly, TypedDict, TypeVar
+from typing_extensions import ParamSpec, ReadOnly, Required, TypedDict, TypeVar
 
 import litellm
 from litellm import verbose_logger
@@ -949,6 +949,46 @@ class _AnthropicToolChangeBlock(TypedDict):
     tool: ReadOnly[Mapping[str, JsonValue]]
 
 
+class _AnthropicHistoryBlock(TypedDict, total=False):
+    type: Required[
+        ReadOnly[
+            Literal[
+                "search_result",
+                "compaction",
+                "mcp_tool_use",
+                "mcp_tool_result",
+                "mcp_tool_listing",
+                "browser_state",
+                "fallback",
+            ]
+        ]
+    ]
+    content: ReadOnly[str | list[AnthropicMessagesTextParam] | None]
+    title: ReadOnly[str]
+    tool_changes: ReadOnly[list[_AnthropicToolChangeBlock] | None]
+
+
+def _count_anthropic_history_text(
+    count_function: TokenCounterFunction,
+    block: _AnthropicHistoryBlock,
+    use_default_image_token_count: bool,
+    default_token_count: int | None,
+) -> int:
+    content: Final = block.get("content")
+    text_tokens: Final = (
+        count_function(content)
+        if isinstance(content, str)
+        else _count_content_list(count_function, content or (), use_default_image_token_count, default_token_count)
+    )
+    if block["type"] == "search_result":
+        return text_tokens + count_function(block.get("title", ""))
+    if block["type"] == "compaction" and (tool_changes := block.get("tool_changes")):
+        return text_tokens + _count_content_list(
+            count_function, tool_changes, use_default_image_token_count, default_token_count
+        )
+    return text_tokens
+
+
 def _count_content_list(
     count_function: TokenCounterFunction,
     content_list: str
@@ -960,6 +1000,7 @@ def _count_content_list(
         | AnthropicMessagesImageParam
         | AnthropicMessagesDocumentParam
         | _AnthropicToolChangeBlock
+        | _AnthropicHistoryBlock
     ],
     use_default_image_token_count: bool,
     default_token_count: int | None,
@@ -1003,6 +1044,14 @@ def _count_content_list(
                 )
             elif c["type"] == "tool_addition" or c["type"] == "tool_removal":
                 num_tokens += count_function(json.dumps(c["tool"], ensure_ascii=False))
+            elif c["type"] == "search_result" or c["type"] == "mcp_tool_result" or c["type"] == "compaction":
+                num_tokens += _count_anthropic_history_text(
+                    count_function, c, use_default_image_token_count, default_token_count
+                )
+            elif c["type"] in ("mcp_tool_use", "mcp_tool_listing", "browser_state"):
+                num_tokens += count_function(json.dumps(c, ensure_ascii=False))
+            elif c["type"] == "fallback":
+                continue
             elif c["type"] in ("thinking", "redacted_thinking"):
                 # Claude extended thinking content block
                 # Count the thinking text and skip the opaque blobs (signature, redacted data)
