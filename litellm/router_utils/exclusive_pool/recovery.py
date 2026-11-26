@@ -154,9 +154,16 @@ def fail(
 def _failed_health(health: Health, operation: Operation, policy: ErrorPolicy, now: float, jitter: float) -> Health:
     if health.status in ("cooldown", "disabled") and health.generation != operation.health_generation:
         return health
+    backoff: Final = 1 << min(max(health.cycles, 0), 6)
+    spread: Final = 1 + max(0, min(jitter, 0.1))
+    interval: Final = (
+        min(3600, 900 * backoff) * spread
+        if policy.kind == "disabled"
+        else min(300, policy.base_seconds * backoff * spread)
+    )
     delay: Final = max(
         retry_after(policy.retry_after, now),
-        min(300, policy.base_seconds * (1 << min(max(health.cycles, 0), 6)) * (1 + max(0, min(jitter, 0.1)))),
+        interval,
     )
     return health.model_copy(
         update={
@@ -179,7 +186,7 @@ def claim_probe(state: Snapshot, config: PoolConfig, resource: str, operation: s
     target: Final = next(r for r in config.resources if r.id == resource)
     upstream_ids: Final = config.upstream_deployments(target.upstream_id)
     scope_ids: Final = frozenset(r.id for r in config.resources if r.scope == target.scope)
-    if health.status != "cooldown" or health.retry_at > now:
+    if health.status not in ("cooldown", "disabled") or health.retry_at > now:
         return Denied(state=state, failure=exhausted())
     if any(op.resource in scope_ids and in_flight(op, config, now) for op in state.operations):
         return Denied(state=state, failure=exhausted())

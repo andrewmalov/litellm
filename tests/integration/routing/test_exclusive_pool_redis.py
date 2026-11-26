@@ -128,7 +128,8 @@ async def test_first_device_race_shares_key_assignment_and_lost_state_never_boot
 
 
 @pytest.mark.asyncio
-async def test_only_one_recovery_worker_can_generate_a_probe(store: RedisPoolStore) -> None:
+@pytest.mark.parametrize("status", ("cooldown", "disabled"))
+async def test_only_one_recovery_worker_can_generate_a_probe(store: RedisPoolStore, status: str) -> None:
     from litellm.router_utils.exclusive_pool.request import Ticket
     from litellm.router_utils.exclusive_pool.worker import RecoveryWorker
 
@@ -138,7 +139,7 @@ async def test_only_one_recovery_worker_can_generate_a_probe(store: RedisPoolSto
         lambda snapshot, now: snapshot.model_copy(
             update={
                 "health": tuple(
-                    h.model_copy(update={"status": "cooldown"}) if h.resource == "a" else h for h in snapshot.health
+                    h.model_copy(update={"status": status}) if h.resource == "a" else h for h in snapshot.health
                 )
             }
         )

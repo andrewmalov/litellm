@@ -1,10 +1,11 @@
 from typing import Final
 
 import httpx
-import litellm
 
-from litellm.router_utils.exclusive_pool.models import Admission, Denied, Granted, Limits, PoolConfig, Resource
-from litellm.router_utils.exclusive_pool.recovery import classify, fail, claim_probe, probe_success, retry_after
+import litellm
+from litellm.router_utils.exclusive_pool.discovery import CatalogRow, discover, reconcile
+from litellm.router_utils.exclusive_pool.models import Admission, Denied, Failure, Granted, Limits, PoolConfig, Resource
+from litellm.router_utils.exclusive_pool.recovery import claim_probe, classify, fail, probe_success, retry_after
 from litellm.router_utils.exclusive_pool.state import acquire, empty_state, start
 
 
@@ -209,6 +210,60 @@ def test_permanent_provider_quota_is_disabled_using_structured_body() -> None:
     )
     assert classify(error).kind == "disabled"
     assert classify(error).shared_quota
+
+
+def test_permission_denied_upstream_resumes_client_routing_after_a_successful_probe() -> None:
+    cfg: Final = config()
+    request: Final = Admission(client="c", device="d", operation="one", tokens=10, eligible=("a",))
+    admitted: Final = acquire(empty_state(cfg), cfg, request, now=0)
+    assert isinstance(admitted, Granted)
+    policy: Final = classify(
+        litellm.PermissionDeniedError(
+            message="permission denied",
+            model="model",
+            llm_provider="anthropic",
+            response=httpx.Response(403, request=httpx.Request("POST", "https://example.test/v1/messages")),
+        )
+    )
+    disabled: Final = fail(start(admitted.state, "one", now=0), cfg, "one", policy, now=1, jitter=0)
+    assert isinstance(acquire(disabled, cfg, request, now=900), Denied)
+    assert isinstance(claim_probe(disabled, cfg, "a", "early", now=900), Denied)
+    first: Final = claim_probe(disabled, cfg, "a", "first", now=901)
+    assert isinstance(first, Granted)
+    rejected: Final = fail(start(first.state, "first", now=901), cfg, "first", policy, now=902, jitter=0)
+    assert isinstance(claim_probe(rejected, cfg, "a", "early", now=2701), Denied)
+    second: Final = claim_probe(rejected, cfg, "a", "second", now=2702)
+    assert isinstance(second, Granted)
+    rejected_again: Final = fail(start(second.state, "second", now=2702), cfg, "second", policy, now=2703, jitter=0)
+    assert isinstance(claim_probe(rejected_again, cfg, "a", "early", now=6302), Denied)
+    third: Final = claim_probe(rejected_again, cfg, "a", "third", now=6303)
+    assert isinstance(third, Granted)
+    capped: Final = fail(start(third.state, "third", now=6303), cfg, "third", policy, now=6304, jitter=0)
+    assert isinstance(acquire(capped, cfg, request, now=9904), Denied)
+    final_probe: Final = claim_probe(capped, cfg, "a", "final", now=9904)
+    assert isinstance(final_probe, Granted)
+    restored: Final = probe_success(final_probe.state, cfg, "final", now=9905)
+    assert isinstance(acquire(restored, cfg, request, now=9906), Granted)
+
+
+def test_existing_disabled_upstream_is_probed_only_while_its_catalog_entry_is_active() -> None:
+    cfg: Final = PoolConfig(pool_id="p", discovery=True, client_limits=Limits())
+    row: Final = CatalogRow(
+        model_id="a", model_name="model", model_info={"exclusive_pool": "p", "exclusive_pool_role": "primary"}
+    )
+    catalog: Final = discover((row,), cfg)
+    assert not isinstance(catalog, Failure)
+    original: Final = reconcile(empty_state(cfg), cfg, catalog, now=100)
+    assert not isinstance(original, Failure)
+    disabled: Final = original.model_copy(
+        update={"health": (original.health[0].model_copy(update={"status": "disabled", "retry_at": 10, "cycles": 1}),)}
+    )
+    assert isinstance(claim_probe(disabled, cfg.resolve(disabled), "a", "probe", now=101), Granted)
+    blocked_catalog: Final = discover((row.model_copy(update={"blocked": True}),), cfg)
+    assert not isinstance(blocked_catalog, Failure)
+    blocked: Final = reconcile(disabled, cfg, blocked_catalog, now=100)
+    assert not isinstance(blocked, Failure)
+    assert isinstance(claim_probe(blocked, cfg.resolve(blocked), "a", "probe", now=101), Denied)
 
 
 def test_probe_reserves_its_input_even_with_tiny_client_output_cap() -> None:
