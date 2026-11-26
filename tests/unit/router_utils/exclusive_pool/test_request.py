@@ -145,6 +145,59 @@ def test_anthropic_system_prompt_is_included_in_token_reservation() -> None:
     assert _estimate(long) > _estimate(short)
 
 
+@pytest.mark.parametrize("action", ("tool_addition", "tool_removal"))
+def test_anthropic_tool_changes_are_admitted_and_counted(action: str) -> None:
+    def request(value: str) -> RequestView:
+        tool: Final = (
+            {
+                "type": "tool_definition",
+                "definition": {"name": "lookup", "description": value, "input_schema": {"type": "object"}},
+            }
+            if action == "tool_addition"
+            else {"type": "tool_reference", "name": value}
+        )
+        return RequestView.model_validate(
+            {
+                "model": "alias",
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "system", "content": [{"type": action, "tool": tool}]},
+                ],
+            }
+        )
+
+    short: Final = request("lookup")
+    long: Final = request("lookup_additional_details")
+    assert short.supports("anthropic_messages")
+    assert not short.supports("acompletion")
+    assert _estimate(long) > _estimate(short)
+
+
+def test_anthropic_tool_search_reference_in_tool_result_is_admitted() -> None:
+    request: Final = RequestView.model_validate(
+        {
+            "model": "alias",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "tool-1", "name": "search", "input": {}}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": [{"type": "tool_reference", "tool_name": "lookup"}],
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+    assert request.supports("anthropic_messages")
+
+
 def test_anthropic_response_usage_counts_cached_input_as_well_as_output() -> None:
     from litellm.router_utils.exclusive_pool.request import actual_usage
 

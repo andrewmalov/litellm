@@ -2,6 +2,7 @@
 ## Helper utilities for token counting
 import base64
 import io
+import json
 import math
 import struct
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -12,7 +13,8 @@ import anyio
 import anyio.lowlevel
 import httpx
 import tiktoken
-from typing_extensions import ParamSpec, TypeVar
+from pydantic import JsonValue
+from typing_extensions import ParamSpec, ReadOnly, TypedDict, TypeVar
 
 import litellm
 from litellm import verbose_logger
@@ -942,6 +944,11 @@ def _count_anthropic_content(
     return tokens
 
 
+class _AnthropicToolChangeBlock(TypedDict):
+    type: ReadOnly[Literal["tool_addition", "tool_removal"]]
+    tool: ReadOnly[Mapping[str, JsonValue]]
+
+
 def _count_content_list(
     count_function: TokenCounterFunction,
     content_list: str
@@ -952,6 +959,7 @@ def _count_content_list(
         | AnthropicMessagesTextParam
         | AnthropicMessagesImageParam
         | AnthropicMessagesDocumentParam
+        | _AnthropicToolChangeBlock
     ],
     use_default_image_token_count: bool,
     default_token_count: int | None,
@@ -993,6 +1001,8 @@ def _count_content_list(
                     use_default_image_token_count,
                     default_token_count,
                 )
+            elif c["type"] == "tool_addition" or c["type"] == "tool_removal":
+                num_tokens += count_function(json.dumps(c["tool"], ensure_ascii=False))
             elif c["type"] in ("thinking", "redacted_thinking"):
                 # Claude extended thinking content block
                 # Count the thinking text and skip the opaque blobs (signature, redacted data)

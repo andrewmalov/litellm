@@ -133,8 +133,10 @@ def _supported_block(block: JsonValue) -> bool:
     if not isinstance(block, dict):
         return False
     match block.get("type"):
-        case "text" | "tool_use" | "thinking" | "redacted_thinking":
+        case "text" | "tool_use" | "tool_reference" | "thinking" | "redacted_thinking":
             return True
+        case "tool_addition" | "tool_removal":
+            return isinstance(block.get("tool"), dict)
         case "image" | "document":
             source: Final = block.get("source")
             return isinstance(source, dict) and source.get("type") in ("base64", "url", "text", "content", "file")

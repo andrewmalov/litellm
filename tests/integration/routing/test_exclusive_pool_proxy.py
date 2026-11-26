@@ -20,6 +20,7 @@ from redis import Redis
 
 from litellm.router_utils.exclusive_pool.models import Limits, PoolConfig, Resource, Snapshot
 from litellm.router_utils.exclusive_pool.state import empty_state
+from litellm.types.llms.anthropic import ANTHROPIC_MID_CONVERSATION_TOOL_CHANGES_BETA_HEADER
 from tests.integration._support.asgi import asgi_server
 from tests.integration._support.client import Gateway, eventually
 from tests.integration._support.process import owned_proxy
@@ -731,6 +732,44 @@ def test_messages_large_text_is_estimated_locally_on_the_assigned_upstream(rig: 
         assert system_text in json.dumps(payload)
         assert rig.counts.empty()
         assert response.headers["x-litellm-model-id"] == rig.config.primaries[0].id
+    finally:
+        rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize("rig", ["anthropic"], indirect=True)
+def test_messages_tool_changes_reach_native_upstream_with_beta_headers(rig: Rig) -> None:
+    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    inline_beta: Final = "inline-tools-2026-09-15"
+    messages: Final[list[JsonValue]] = [
+        {"role": "user", "content": "hello"},
+        {
+            "role": "system",
+            "content": [
+                {
+                    "type": "tool_addition",
+                    "tool": {
+                        "type": "tool_definition",
+                        "definition": {"name": "lookup", "input_schema": {"type": "object"}},
+                    },
+                },
+                {"type": "tool_removal", "tool": {"type": "tool_reference", "name": "previous_tool"}},
+            ],
+        },
+    ]
+    try:
+        rig.stream_release.set()
+        response: Final = rig.proxy.request(
+            "POST",
+            "/v1/messages?beta=true",
+            {"model": rig.config.models[0], "max_tokens": 16, "messages": messages, "stream": True},
+            key=key,
+            headers={"anthropic-beta": inline_beta},
+        )
+        assert response.status_code == 200, response.text
+        assert "event: message_stop" in response.text
+        assert rig.payloads.get(timeout=5)["messages"] == messages
+        assert {inline_beta, ANTHROPIC_MID_CONVERSATION_TOOL_CHANGES_BETA_HEADER} <= rig.generation_betas.get(timeout=5)
+        assert rig.counts.empty()
     finally:
         rig.proxy.post("/key/delete", {"keys": [key]})
 
