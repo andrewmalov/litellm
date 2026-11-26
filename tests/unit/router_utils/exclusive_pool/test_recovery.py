@@ -1,12 +1,20 @@
 from typing import Final
 
 import httpx
+import pytest
 
 import litellm
 from litellm.router_utils.exclusive_pool.discovery import CatalogRow, discover, reconcile
 from litellm.router_utils.exclusive_pool.models import Admission, Denied, Failure, Granted, Limits, PoolConfig, Resource
-from litellm.router_utils.exclusive_pool.recovery import claim_probe, classify, fail, probe_success, retry_after
-from litellm.router_utils.exclusive_pool.state import acquire, empty_state, start
+from litellm.router_utils.exclusive_pool.recovery import (
+    ErrorPolicy,
+    claim_probe,
+    classify,
+    fail,
+    probe_success,
+    retry_after,
+)
+from litellm.router_utils.exclusive_pool.state import acquire, empty_state, start, sweep
 
 
 def config() -> PoolConfig:
@@ -92,9 +100,7 @@ def test_confirmed_error_cools_down_once_and_only_one_coordinator_can_probe() ->
     assert probe_success(recovered, cfg, "probe", now=202) == recovered
 
 
-def test_fallback_capacity_increases_only_after_successful_request_completion() -> None:
-    from litellm.router_utils.exclusive_pool.state import complete
-
+def test_existing_backup_cooldown_allows_admission_without_a_probe() -> None:
     cfg: Final = config()
     initialized: Final = empty_state(cfg)
     cold: Final = initialized.model_copy(
@@ -105,19 +111,30 @@ def test_fallback_capacity_increases_only_after_successful_request_completion() 
             )
         }
     )
-    claimed: Final = claim_probe(cold, cfg, "f", "probe", now=1)
-    assert isinstance(claimed, Granted)
-    warm: Final = probe_success(claimed.state, cfg, "probe", now=2)
+    assert isinstance(claim_probe(cold, cfg, "f", "probe", now=1), Denied)
     first: Final = acquire(
-        warm, cfg, Admission(client="c", device="d", operation="a", tokens=1, eligible=("f",)), now=3
+        cold, cfg, Admission(client="c", device="d", operation="a", tokens=1, eligible=("f",)), now=3
     )
     assert isinstance(first, Granted)
-    rejected: Final = acquire(
-        first.state, cfg, Admission(client="other", device="d", operation="b", tokens=1, eligible=("f",)), now=3
-    )
-    assert isinstance(rejected, Denied)
-    completed: Final = complete(start(first.state, "a", now=3), cfg, "a", now=4)
-    assert completed.health[1].capacity == 2
+    assert sweep(first.state, cfg, now=4).health[1].status == "ready"
+
+
+@pytest.mark.parametrize(
+    "policy",
+    (
+        ErrorPolicy(kind="cooldown", confirmed_end=True),
+        ErrorPolicy(kind="disabled", confirmed_end=True),
+    ),
+)
+def test_backup_keeps_accepting_requests_after_an_upstream_error(policy: ErrorPolicy) -> None:
+    cfg: Final = config()
+    request: Final = Admission(client="first", device="d", operation="first", tokens=1, eligible=("f",))
+    first: Final = acquire(empty_state(cfg), cfg, request, now=0)
+    assert isinstance(first, Granted)
+    failed: Final = fail(start(first.state, "first", now=0), cfg, "first", policy, now=1, jitter=0)
+    second: Final = acquire(failed, cfg, request.model_copy(update={"client": "other", "operation": "next"}), now=2)
+    assert isinstance(second, Granted) and second.resource == "f"
+    assert not any(h.status != "ready" for h in failed.health)
 
 
 def test_provider_quota_blocks_all_deployments_in_the_same_scope() -> None:

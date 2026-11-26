@@ -136,15 +136,26 @@ def fail(
         else config.upstream_deployments(resource.upstream_id)
     )
     audited: Final = record_event(
-        ended, config, Event(time=now, kind=f"upstream_{policy.kind}", client=active.client, resource=resource.id)
+        ended,
+        config,
+        Event(
+            time=now,
+            kind="upstream_backup_error" if config.is_fallback(resource.id) else f"upstream_{policy.kind}",
+            client=active.client,
+            resource=resource.id,
+        ),
     )
+    affected_primaries: Final = affected.difference(r.id for r in config.fallbacks)
     return audited.model_copy(
         update={
             "health": tuple(
-                _failed_health(h, active, policy, now, jitter) if h.resource in affected else h for h in ended.health
+                _failed_health(h, active, policy, now, jitter) if h.resource in affected_primaries else h
+                for h in ended.health
             ),
             "sessions": tuple(
-                s.model_copy(update={"resource": None}) if s.resource in affected and s.pinned_upstream is None else s
+                s.model_copy(update={"resource": None})
+                if s.resource in affected_primaries and s.pinned_upstream is None
+                else s
                 for s in ended.sessions
             ),
         }
@@ -178,7 +189,7 @@ def _failed_health(health: Health, operation: Operation, policy: ErrorPolicy, no
 
 
 def claim_probe(state: Snapshot, config: PoolConfig, resource: str, operation: str, now: float) -> Outcome:
-    if resource not in tuple(r.id for r in config.selectable):
+    if config.is_fallback(resource) or resource not in tuple(r.id for r in config.selectable):
         return Denied(state=state, failure=exhausted())
     if config.discovery and (state.discovered_at is None or now - state.discovered_at >= config.heartbeat_timeout):
         return Denied(state=state, failure=exhausted())
@@ -243,11 +254,6 @@ def probe_success(state: Snapshot, config: PoolConfig, operation: str, now: floa
     ended: Final = complete(state, config, operation, now)
     target: Final = next(r for r in config.resources if r.id == active.resource)
     upstream_ids: Final = config.upstream_deployments(target.upstream_id)
-    fallback: Final = (
-        any(entry.resource.id == active.resource and entry.role == "fallback" for entry in state.catalog)
-        if config.discovery
-        else config.is_fallback(active.resource)
-    )
     return ended.model_copy(
         update={
             "health": tuple(
@@ -255,7 +261,7 @@ def probe_success(state: Snapshot, config: PoolConfig, operation: str, now: floa
                     update={
                         "status": "ready",
                         "success_since": now,
-                        "capacity": 1 if fallback and target.limits.parallel is not None else None,
+                        "capacity": None,
                     }
                 )
                 if h.resource in upstream_ids

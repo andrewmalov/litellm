@@ -105,15 +105,15 @@ def _resource_available(
     state: Snapshot, config: PoolConfig, resource: Resource, request: Admission, now: float
 ) -> bool:
     health: Final = next(h for h in state.health if h.resource == resource.id)
-    if resource.id not in request.eligible or health.status != "ready":
+    exclusive: Final = not config.is_fallback(resource.id)
+    if resource.id not in request.eligible or (exclusive and health.status != "ready"):
         return False
     limit: Final = resource.limits.parallel
     if limit is not None and sum(
         in_flight(op, config, now) for op in _scope_operations(state, config, resource)
-    ) >= min(limit, health.capacity or limit):
+    ) >= min(limit, (health.capacity if exclusive else None) or limit):
         return False
     upstream_ids: Final = config.upstream_deployments(resource.upstream_id)
-    exclusive: Final = not config.is_fallback(resource.id)
     if exclusive and any(s.client != request.client and s.resource in upstream_ids for s in state.sessions):
         return False
     if any(
@@ -499,4 +499,14 @@ def sweep(state: Snapshot, config: PoolConfig, now: float) -> Snapshot:
         op for op in quarantined.operations if op.quarantined and now - op.heartbeat >= QUARANTINE_TIMEOUT_SECONDS
     )
     recovered: Final = reduce(lambda current, op: _release_uncertain(current, config, op, None), timed_out, quarantined)
-    return _prune(recovered, now)
+    return _prune(
+        recovered.model_copy(
+            update={
+                "health": tuple(
+                    Health(resource=h.resource) if config.is_fallback(h.resource) and h.status != "ready" else h
+                    for h in recovered.health
+                ),
+            }
+        ),
+        now,
+    )

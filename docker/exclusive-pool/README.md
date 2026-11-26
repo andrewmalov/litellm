@@ -135,7 +135,7 @@ Retired catalog records are retained for safety. For a registered ID, the public
 
 Discovery reads the writer database. A failed DB read or malformed pool metadata does not become an empty catalog. Protected requests fail closed when required synchronization fails. No new admissions or probes occur once the catalog is older than `heartbeat_timeout`. Unrelated models continue serving independently
 
-The recovery worker periodically sends a short generation request to active upstreams in `disabled`. The retry delay starts at 15 minutes and backs off to one hour plus jitter. Upstreams already in `disabled` are eligible when their stored retry time has passed. A successful probe restores routing. Model registrations blocked in the catalog remain ineligible for probes and client requests
+The recovery worker periodically sends a short generation request to active primary upstreams in `disabled`. The retry delay starts at 15 minutes and backs off to one hour plus jitter. A successful probe restores routing. The fallback remains eligible after upstream failures and skips recovery probes. Its failures are recorded as `upstream_backup_error`. Model registrations blocked in the catalog remain ineligible for probes and client requests
 
 The recovery worker releases quarantined operations on its first sweep at least five minutes after their last heartbeat. New requests from the same client can overlap with a quarantined request that is still generating upstream. After the quarantine expires, requests from another client can overlap too. Use `confirm` to release a quarantined operation early after verifying the named request ended upstream. A healthy operation cannot be confirmed away
 

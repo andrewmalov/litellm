@@ -118,9 +118,7 @@ def test_backup_server_reference_stays_on_its_original_upstream() -> None:
     assert isinstance(retained, Granted) and retained.resource == "f"
 
 
-def test_unlimited_backup_admits_multiple_keys_after_recovery_even_with_quarantine() -> None:
-    from litellm.router_utils.exclusive_pool.recovery import ErrorPolicy, claim_probe, fail, probe_success
-
+def test_unlimited_backup_admits_multiple_keys_even_with_quarantine() -> None:
     defaults: Final = config()
     cfg: Final = PoolConfig.model_validate(
         {**defaults.model_dump(), "fallback": {"id": "f", "upstream_id": "physical-f", "limits": {"parallel": None}}}
@@ -128,20 +126,7 @@ def test_unlimited_backup_admits_multiple_keys_after_recovery_even_with_quaranti
     on_backup: Final = request("first").model_copy(update={"eligible": ("f",)})
     first: Final = acquire(empty_state(cfg), cfg, on_backup, now=0)
     assert isinstance(first, Granted)
-    cooled: Final = fail(
-        start(first.state, "first", now=0),
-        cfg,
-        "first",
-        ErrorPolicy(kind="cooldown", confirmed_end=True),
-        now=1,
-        jitter=0,
-    )
-    probe: Final = claim_probe(cooled, cfg, "f", "probe", now=17)
-    assert isinstance(probe, Granted)
-    ready: Final = probe_success(probe.state, cfg, "probe", now=18)
-    uncertain: Final = acquire(ready, cfg, on_backup.model_copy(update={"operation": "stale"}), now=19)
-    assert isinstance(uncertain, Granted)
-    quarantined: Final = quarantine(start(uncertain.state, "stale", now=19), "stale")
+    quarantined: Final = quarantine(start(first.state, "first", now=0), "first")
     replies: Final = tuple(
         request(key).model_copy(update={"eligible": ("f",)}) for key in ("second", "third", "fourth")
     )

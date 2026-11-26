@@ -263,27 +263,20 @@ def test_recovery_generations_and_subsequent_disable_are_shared_by_all_models() 
 
 
 @pytest.mark.parametrize("retire", [False, True])
-def test_fallback_capacity_ramp_is_shared_between_models(retire: bool) -> None:
+def test_backup_failure_does_not_block_other_model_aliases(retire: bool) -> None:
     config: Final = _config()
     rows: Final = _upstream_rows("f", "fallback")
     initial: Final = _reconcile(empty_state(config), config, rows, 1)
     first: Final = _admit(initial, "one", "opus", "first")
     assert isinstance(first, Granted)
-    cooled: Final = fail(
+    failed: Final = fail(
         first.state, config.resolve(first.state), "first", ErrorPolicy(kind="cooldown", confirmed_end=True), 3, 0
     )
-    current: Final = _reconcile(cooled, config, rows[:2] if retire else rows, 4)
-    probe: Final = claim_probe(current, config.resolve(current), "f-sonnet", "probe", 19)
-    assert isinstance(probe, Granted)
-    recovered: Final = probe_success(probe.state, config.resolve(probe.state), "probe", 20)
-    assert all(h.status == "ready" and h.capacity == 1 for h in recovered.health)
-    refreshed: Final = _reconcile(recovered, config, rows[:2] if retire else rows, 20)
-    assert all(h.status == "ready" and h.capacity == 1 for h in refreshed.health)
-    one: Final = _admit(refreshed, "one", "sonnet", "one", 21)
-    assert isinstance(one, Granted)
-    assert not isinstance(_admit(one.state, "two", "opus", "two", 21), Granted)
-    ended: Final = complete(one.state, config.resolve(one.state), "one", 22)
-    assert all(h.capacity == 2 for h in ended.health)
+    current: Final = _reconcile(failed, config, rows[:2] if retire else rows, 4)
+    one: Final = _admit(current, "one", "sonnet", "one", 5)
+    assert isinstance(one, Granted) and one.resource == "f-sonnet"
+    two: Final = _admit(one.state, "two", "opus", "two", 5)
+    assert isinstance(two, Granted) and two.resource == "f-opus"
 
 
 def _config() -> PoolConfig:
