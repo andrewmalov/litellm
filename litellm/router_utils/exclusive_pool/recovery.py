@@ -153,9 +153,7 @@ def fail(
                 for h in ended.health
             ),
             "sessions": tuple(
-                s.model_copy(update={"resource": None})
-                if s.resource in affected_primaries and s.pinned_upstream is None
-                else s
+                s.model_copy(update={"resource": None}) if s.resource in affected_primaries else s
                 for s in ended.sessions
             ),
         }

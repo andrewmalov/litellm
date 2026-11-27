@@ -35,12 +35,21 @@ def _upstream_rows(
     )
 
 
-def _admit(snapshot: Snapshot, client: str, model: str, operation: str, now: float = 2) -> Outcome:
+def _admit(
+    snapshot: Snapshot, client: str, model: str, operation: str, now: float = 2, *, requires_binding: bool = False
+) -> Outcome:
     eligible: Final = tuple(e.resource.id for e in snapshot.catalog if e.active and e.model == model)
     return acquire(
         snapshot,
         _config().resolve(snapshot),
-        Admission(client=client, device="device", operation=operation, tokens=10, eligible=eligible),
+        Admission(
+            client=client,
+            device="device",
+            operation=operation,
+            tokens=10,
+            eligible=eligible,
+            requires_binding=requires_binding,
+        ),
         now,
     )
 
@@ -456,7 +465,7 @@ def test_pinned_server_context_switches_models_within_one_account_and_cannot_fai
     )
     assert isinstance(first, Granted)
     finished: Final = complete(start(first.state, "server-tools", 2), config.resolve(first.state), "server-tools", 3)
-    switched: Final = _admit(finished, "one", "sonnet", "switch", 4)
+    switched: Final = _admit(finished, "one", "sonnet", "switch", 4, requires_binding=True)
     assert isinstance(switched, Granted)
     assert switched.resource == "a-sonnet"
     broken: Final = fail(
@@ -467,6 +476,6 @@ def test_pinned_server_context_switches_models_within_one_account_and_cannot_fai
         5,
         0,
     )
-    denied: Final = _admit(broken, "one", "haiku", "retry", 6)
+    denied: Final = _admit(broken, "one", "haiku", "retry", 6, requires_binding=True)
     assert not isinstance(denied, Granted)
     assert denied.failure.code == "endpoint_pool_exhausted"

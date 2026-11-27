@@ -263,7 +263,7 @@ def test_account_reference_without_live_session_fails_before_any_reservation() -
     assert outcome.state == initial
 
 
-def test_pinned_account_cannot_fallback_after_failure_even_for_plain_text() -> None:
+def test_pinned_account_only_blocks_replay_of_server_references() -> None:
     from litellm.router_utils.exclusive_pool.recovery import ErrorPolicy, fail
 
     cfg: Final = config()
@@ -276,10 +276,17 @@ def test_pinned_account_cannot_fallback_after_failure_even_for_plain_text() -> N
         now=1,
         jitter=0,
     )
-    denied: Final = acquire(broken, cfg, request("one", operation="next"), now=2)
+    moved: Final = acquire(broken, cfg, request("one", operation="next"), now=2)
+    assert isinstance(moved, Granted) and moved.resource == "b"
+    denied: Final = acquire(
+        moved.state,
+        cfg,
+        request("one", operation="reference").model_copy(update={"requires_binding": True}),
+        now=2,
+    )
     assert denied.kind == "denied"
     assert denied.failure.code == "endpoint_pool_exhausted"
-    assert denied.state.charges == broken.charges
+    assert denied.state.charges == moved.state.charges
     expired: Final = acquire(
         broken, cfg, request("one", operation="late").model_copy(update={"requires_binding": True}), now=1000
     )
@@ -320,6 +327,28 @@ def test_a_failed_pinned_dialogue_does_not_block_another_dialogue_on_the_same_ke
     assert isinstance(returning, Granted) and returning.resource == "a"
 
 
+def test_references_are_rejected_if_a_dialogue_created_server_state_on_two_accounts() -> None:
+    from litellm.router_utils.exclusive_pool.recovery import ErrorPolicy, fail
+
+    cfg: Final = config()
+    creator: Final = request("one").model_copy(update={"dialogue": "original", "pin_upstream": True})
+    first: Final = acquire(empty_state(cfg), cfg, creator, now=0)
+    broken: Final = fail(
+        start(first.state, "one", now=0),
+        cfg,
+        "one",
+        ErrorPolicy(kind="cooldown", confirmed_end=True, base_seconds=10),
+        now=1,
+        jitter=0,
+    )
+    second: Final = acquire(broken, cfg, creator.model_copy(update={"operation": "second"}), now=2)
+    assert isinstance(second, Granted) and second.resource == "b"
+    finished: Final = complete(start(second.state, "second", now=2), cfg, "second", now=3)
+    followup: Final = creator.model_copy(update={"operation": "ref", "requires_binding": True})
+    denied: Final = acquire(finished, cfg, followup, now=4)
+    assert isinstance(denied, Denied) and denied.failure.code == "pool_reference_binding_required"
+
+
 def test_other_dialogue_activity_does_not_extend_a_server_binding() -> None:
     cfg: Final = config()
     initial: Final = Admission(
@@ -345,7 +374,7 @@ def test_other_dialogue_activity_does_not_extend_a_server_binding() -> None:
     assert isinstance(expired, Denied) and expired.failure.code == "pool_reference_binding_required"
 
 
-def test_key_level_pin_is_only_used_by_requests_without_a_dialogue_id() -> None:
+def test_legacy_pin_does_not_block_portable_requests() -> None:
     from litellm.router_utils.exclusive_pool.models import Session
 
     cfg: Final = config()
@@ -364,7 +393,7 @@ def test_key_level_pin_is_only_used_by_requests_without_a_dialogue_id() -> None:
     cooling: Final = initial.health[0].model_copy(update={"status": "cooldown"})
     migrated: Final = initial.model_copy(update={"sessions": (legacy,), "health": (cooling, *initial.health[1:])})
     anonymous: Final = acquire(migrated, cfg, request("one"), now=1)
-    assert isinstance(anonymous, Denied) and anonymous.failure.code == "endpoint_pool_exhausted"
+    assert isinstance(anonymous, Granted) and anonymous.resource == "b"
     identified: Final = acquire(migrated, cfg, request("one").model_copy(update={"dialogue": "new"}), now=1)
     assert isinstance(identified, Granted) and identified.resource == "b"
 

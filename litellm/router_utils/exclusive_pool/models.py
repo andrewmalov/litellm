@@ -164,8 +164,8 @@ class Failure(FrozenModel):
 
 
 class DialoguePin(FrozenModel):
-    dialogue: str
-    upstream: str
+    dialogue: str | None
+    upstream: str | None
     last_activity: float
 
 

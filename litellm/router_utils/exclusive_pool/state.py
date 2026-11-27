@@ -218,12 +218,13 @@ def _routing_model(config: PoolConfig, model: str | None) -> str | None:
     return model if model in config.models else None
 
 
-def _pinned_upstream(session: Session | None, dialogue: str | None) -> str | None:
+def _dialogue_pin(session: Session | None, dialogue: str | None) -> DialoguePin | None:
     if session is None:
         return None
-    if dialogue is None:
-        return session.pinned_upstream
-    return next((pin.upstream for pin in session.dialogue_pins if pin.dialogue == dialogue), None)
+    pin: Final = next((p for p in session.dialogue_pins if p.dialogue == dialogue), None)
+    if pin is None and dialogue is None and session.pinned_upstream is not None:
+        return DialoguePin(dialogue=None, upstream=session.pinned_upstream, last_activity=session.last_activity)
+    return pin
 
 
 def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float) -> Outcome:
@@ -238,7 +239,8 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         if repeated.client != request.client or not in_flight(repeated, config, now):
             return Denied(state=state, failure=unavailable())
         return Granted(state=current, resource=repeated.resource, operation=repeated.id)
-    pinned: Final = _pinned_upstream(session, request.dialogue)
+    pin: Final = _dialogue_pin(session, request.dialogue) if request.requires_binding else None
+    pinned: Final = pin.upstream if pin is not None else None
     if request.requires_binding and pinned is None:
         return Denied(
             state=state,
@@ -378,12 +380,14 @@ def reserve_counted_tokens(
 def _pin_dialogue(session: Session, active: Operation, now: float) -> Session:
     if session.client != active.client or session.generation != active.generation or active.pending_pin is None:
         return session
-    if active.dialogue is None:
-        return session.model_copy(update={"pinned_upstream": session.pinned_upstream or active.pending_pin})
-    upstream: Final = _pinned_upstream(session, active.dialogue) or active.pending_pin
+    previous: Final = _dialogue_pin(session, active.dialogue)
     pins: Final = tuple(pin for pin in session.dialogue_pins if pin.dialogue != active.dialogue)
+    origin: Final = None if previous is not None and previous.upstream != active.pending_pin else active.pending_pin
     return session.model_copy(
-        update={"dialogue_pins": (*pins, DialoguePin(dialogue=active.dialogue, upstream=upstream, last_activity=now))}
+        update={
+            "dialogue_pins": (*pins, DialoguePin(dialogue=active.dialogue, upstream=origin, last_activity=now)),
+            "pinned_upstream": session.pinned_upstream if active.dialogue is not None else None,
+        }
     )
 
 
@@ -460,7 +464,9 @@ def _finish_session(session: Session, active: Operation, still_active: bool, now
     if session.client != active.client or session.generation != active.generation:
         return session
     pins: Final = tuple(
-        pin.model_copy(update={"last_activity": now}) if pin.dialogue == active.dialogue and active.started else pin
+        pin.model_copy(update={"last_activity": now})
+        if pin.dialogue == active.dialogue and active.started and active.pending_pin is not None
+        else pin
         for pin in session.dialogue_pins
     )
     if still_active:

@@ -908,7 +908,7 @@ def test_messages_server_references_pin_the_account_and_block_cross_account_fall
             }
         ]
         assert rig.payloads.get(timeout=5)["container"] == "container-one"
-        plaintext: Final = rig.messages(key, "desktop", metadata=fresh)
+        plaintext: Final = rig.messages(key, "desktop", metadata=original)
         assert plaintext.status_code == 200, plaintext.text
         alternate: Final = rig.calls.get(timeout=5)
         assert alternate != resource

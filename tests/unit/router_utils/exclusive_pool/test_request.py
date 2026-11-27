@@ -213,7 +213,7 @@ def test_anthropic_invalid_messages_are_rejected_before_admission(message: dict[
                     {"type": "mcp_tool_listing", "mcp_server_name": "demo", "tools": []},
                 ],
             },
-            True,
+            False,
         ),
         (
             {"role": "assistant", "content": [{"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}}]},

@@ -19,9 +19,6 @@ ANTHROPIC_SERVER_REFERENCE_BLOCKS: Final = frozenset(
         "bash_code_execution_tool_result",
         "code_execution_tool_result",
         "container_upload",
-        "mcp_tool_listing",
-        "mcp_tool_result",
-        "mcp_tool_use",
         "server_tool_use",
         "text_editor_code_execution_tool_result",
         "tool_search_tool_result",
@@ -80,7 +77,6 @@ class RequestView(FrozenModel):
     container: JsonValue = None
     messages: tuple[Mapping[str, JsonValue], ...] = ()
     tools: tuple[Mapping[str, JsonValue], ...] = ()
-    mcp_servers: JsonValue = None
     functions: tuple[Mapping[str, JsonValue], ...] = ()
     response_format: Mapping[str, JsonValue] | None = None
     output_config: Mapping[str, JsonValue] | None = None
@@ -129,7 +125,6 @@ class RequestView(FrozenModel):
         return (
             self.requires_binding
             or self.container is not None
-            or bool(self.mcp_servers)
             or any(not client_tool(tool.get("type")) for tool in self.tools)
         )
 
@@ -170,7 +165,15 @@ def _supported_block(block: Mapping[str, JsonValue], allowed: tuple[str, ...] | 
         case "text":
             text: Final = block.get("text")
             return isinstance(text, str) and bool(text)
-        case "tool_use" | "tool_reference" | "thinking" | "redacted_thinking" | "fallback":
+        case (
+            "tool_use"
+            | "tool_reference"
+            | "thinking"
+            | "redacted_thinking"
+            | "fallback"
+            | "mcp_tool_listing"
+            | "mcp_tool_use"
+        ):
             return True
         case "tool_addition" | "tool_removal":
             return allowed == _SYSTEM_BLOCKS and isinstance(block.get("tool"), dict)
