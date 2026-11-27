@@ -914,8 +914,12 @@ def test_messages_server_references_pin_the_account_and_block_cross_account_fall
         assert alternate != resource
         unbound_on_alternate: Final = rig.messages(key, "desktop", container="container-one", metadata=fresh)
         assert unbound_on_alternate.status_code == 409, unbound_on_alternate.text
-        retry: Final = rig.messages(key, "third-desktop-session", container="container-one", metadata=original)
-        assert retry.status_code == 503, retry.text
+        retry: Final = rig.messages(
+            key, "third-desktop-session", container="container-one", metadata=original, stream=True
+        )
+        assert retry.status_code == 409, retry.text
+        assert "Аккаунт, к которому привязаны серверные данные этого диалога, недоступен." in retry.text
+        assert "Начните новый диалог" in retry.text
         assert rig.calls.empty()
         assert rig.counts.empty()
     finally:

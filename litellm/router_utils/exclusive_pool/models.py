@@ -156,6 +156,8 @@ class Failure(FrozenModel):
         "unsupported_pool_request",
         "upstream_stream_incomplete",
         "pool_reference_binding_required",
+        "pool_reference_upstream_unavailable",
+        "pool_reference_upstream_busy",
         "pool_token_count_unavailable",
     ]
     status: int

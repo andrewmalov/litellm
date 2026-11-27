@@ -260,6 +260,7 @@ def test_account_reference_without_live_session_fails_before_any_reservation() -
     outcome: Final = acquire(initial, cfg, request("one").model_copy(update={"requires_binding": True}), now=0)
     assert outcome.kind == "denied"
     assert outcome.failure.code == "pool_reference_binding_required"
+    assert "Начните новый диалог" in outcome.failure.message
     assert outcome.state == initial
 
 
@@ -281,12 +282,14 @@ def test_pinned_account_only_blocks_replay_of_server_references() -> None:
     denied: Final = acquire(
         moved.state,
         cfg,
-        request("one", operation="reference").model_copy(update={"requires_binding": True}),
+        request("one", operation="reference").model_copy(update={"requires_binding": True, "model": "model"}),
         now=2,
     )
     assert denied.kind == "denied"
-    assert denied.failure.code == "endpoint_pool_exhausted"
-    assert denied.state.charges == moved.state.charges
+    assert denied.failure.code == "pool_reference_upstream_unavailable"
+    assert denied.failure.status == 409
+    assert "Начните новый диалог" in denied.failure.message
+    assert denied.state == moved.state
     expired: Final = acquire(
         broken, cfg, request("one", operation="late").model_copy(update={"requires_binding": True}), now=1000
     )
@@ -317,7 +320,7 @@ def test_a_failed_pinned_dialogue_does_not_block_another_dialogue_on_the_same_ke
         update={"dialogue": "original", "requires_binding": True}
     )
     denied: Final = acquire(finished, cfg, reference, now=4)
-    assert isinstance(denied, Denied) and denied.failure.code == "endpoint_pool_exhausted"
+    assert isinstance(denied, Denied) and denied.failure.code == "pool_reference_upstream_unavailable"
     independent: Final = acquire(
         finished, cfg, reference.model_copy(update={"client": "two", "dialogue": "original"}), now=4
     )
@@ -325,6 +328,35 @@ def test_a_failed_pinned_dialogue_does_not_block_another_dialogue_on_the_same_ke
     recovered: Final = finished.model_copy(update={"health": empty_state(cfg).health})
     returning: Final = acquire(recovered, cfg, reference, now=12)
     assert isinstance(returning, Granted) and returning.resource == "a"
+
+
+def test_reference_to_a_busy_upstream_can_be_retried_after_the_current_request() -> None:
+    cfg: Final = config()
+    first: Final = acquire(
+        empty_state(cfg), cfg, request("one").model_copy(update={"dialogue": "original", "pin_upstream": True}), now=0
+    )
+    pinned: Final = complete(start(first.state, "one", now=0), cfg, "one", now=1)
+    next_dialogue: Final = request("one", operation="other").model_copy(
+        update={"eligible": ("b",), "dialogue": "other"}
+    )
+    alternate: Final = acquire(
+        pinned.model_copy(update={"sessions": (pinned.sessions[0].model_copy(update={"resource": None}),)}),
+        cfg,
+        next_dialogue,
+        now=2,
+    )
+    assert isinstance(alternate, Granted) and alternate.resource == "b"
+    prior_dialogue: Final = request("one", operation="ref").model_copy(
+        update={"dialogue": "original", "requires_binding": True, "model": "model"}
+    )
+    refused: Final = acquire(alternate.state, cfg, prior_dialogue, now=3)
+    assert isinstance(refused, Denied) and refused.failure.code == "pool_reference_upstream_busy"
+    assert refused.failure.status == 503
+    assert "Повторите запрос позже" in refused.failure.message
+    assert refused.state == alternate.state
+    settled: Final = complete(start(alternate.state, "other", now=2), cfg, "other", now=4)
+    accepted: Final = acquire(settled, cfg, prior_dialogue, now=5)
+    assert isinstance(accepted, Granted) and accepted.resource == "a"
 
 
 def test_references_are_rejected_if_a_dialogue_created_server_state_on_two_accounts() -> None:

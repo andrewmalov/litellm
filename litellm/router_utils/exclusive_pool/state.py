@@ -227,6 +227,23 @@ def _dialogue_pin(session: Session | None, dialogue: str | None) -> DialoguePin 
     return pin
 
 
+def _reference_routing_failure(state: Snapshot, config: PoolConfig, request: Admission, upstream: str) -> Failure:
+    matching: Final = frozenset(r.id for r in config.selectable if r.upstream_id == upstream)
+    eligible: Final = matching.intersection(request.eligible)
+    if any(h.resource in eligible and (h.status == "ready" or config.is_fallback(h.resource)) for h in state.health):
+        return Failure(
+            code="pool_reference_upstream_busy",
+            status=503,
+            message="Аккаунт, к которому привязаны серверные данные этого диалога, сейчас занят. Повторите запрос позже.",
+        )
+    return Failure(
+        code="pool_reference_upstream_unavailable",
+        status=409,
+        message="Аккаунт, к которому привязаны серверные данные этого диалога, недоступен. "
+        "Начните новый диалог, чтобы продолжить работу.",
+    )
+
+
 def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float) -> Outcome:
     if not catalog_is_current(state, config, now):
         return Denied(state=state, failure=unavailable())
@@ -247,7 +264,8 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
             failure=Failure(
                 code="pool_reference_binding_required",
                 status=409,
-                message="Server references require a live assignment to their originating upstream",
+                message="Не удалось найти исходный аккаунт для серверных данных этого диалога. "
+                "Начните новый диалог, чтобы продолжить работу.",
             ),
         )
     logical: Final = request.logical or request.operation
@@ -266,6 +284,8 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         )
     resource: Final = _choose(current, config, request, session, pinned, now)
     if resource is None:
+        if pinned is not None:
+            return Denied(state=state, failure=_reference_routing_failure(current, config, request, pinned))
         model: Final = _routing_model(config, request.model)
         return Denied(state=_count_routing(state, model, "exhausted"), failure=exhausted())
     fallback_transition: Final = (

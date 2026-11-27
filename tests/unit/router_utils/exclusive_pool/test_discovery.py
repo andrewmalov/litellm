@@ -478,4 +478,4 @@ def test_pinned_server_context_switches_models_within_one_account_and_cannot_fai
     )
     denied: Final = _admit(broken, "one", "haiku", "retry", 6, requires_binding=True)
     assert not isinstance(denied, Granted)
-    assert denied.failure.code == "endpoint_pool_exhausted"
+    assert denied.failure.code == "pool_reference_upstream_unavailable"
