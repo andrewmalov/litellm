@@ -163,6 +163,12 @@ class Failure(FrozenModel):
     retry_after: int = 0
 
 
+class DialoguePin(FrozenModel):
+    dialogue: str
+    upstream: str
+    last_activity: float
+
+
 class Session(FrozenModel):
     client: str
     device: str
@@ -171,6 +177,7 @@ class Session(FrozenModel):
     last_activity: float
     established: bool = False
     pinned_upstream: str | None = None
+    dialogue_pins: tuple[DialoguePin, ...] = ()
 
 
 class Operation(FrozenModel):
@@ -181,6 +188,7 @@ class Operation(FrozenModel):
     resource: str
     heartbeat: float
     pending_pin: str | None = None
+    dialogue: str | None = None
     counted: bool = True
     started: bool = False
     quarantined: bool = False
@@ -247,6 +255,7 @@ class Admission(FrozenModel):
     needs_count: bool = False
     pin_upstream: bool = False
     requires_binding: bool = False
+    dialogue: str | None = None
     client: str
     device: str
     operation: str

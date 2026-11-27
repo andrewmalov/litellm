@@ -19,6 +19,8 @@ import litellm
 from litellm.caching.caching import DualCache
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.device_identity import DeviceMissing, device_identity
+from litellm.litellm_core_utils.provider_affinity import get_stable_session_id
+from litellm.llms.anthropic.pass_through.utils import claude_code_session_id
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.types.utils import AllMessageValues, CallTypes, CallTypesLiteral, LLMResponseTypes
 
@@ -118,6 +120,7 @@ class ExclusiveEndpointPool(CustomLogger):
             tpm=min(defaults.tpm, user_api_key_dict.tpm_limit or defaults.tpm),
         )
         anthropic: Final = call_type in ("anthropic_messages", "aanthropic_messages")
+        dialogue: Final = get_stable_session_id(data) or claude_code_session_id(request.metadata.get("user_id"))
         ticket: Final = Ticket(
             operation=uuid.uuid4().hex,
             anthropic=anthropic,
@@ -128,6 +131,7 @@ class ExclusiveEndpointPool(CustomLogger):
             needs_count=True,
             pin_upstream=anthropic and request.pin_upstream,
             requires_binding=anthropic and request.requires_binding,
+            dialogue=safe_id(self.store.config.pool_id, dialogue) if dialogue else None,
             limits=limits,
         )
         metadata_key: Final = (
@@ -177,6 +181,7 @@ class ExclusiveEndpointPool(CustomLogger):
                 needs_count=ticket.needs_count,
                 pin_upstream=ticket.pin_upstream,
                 requires_binding=ticket.requires_binding,
+                dialogue=ticket.dialogue,
             )
         )
         match outcome:

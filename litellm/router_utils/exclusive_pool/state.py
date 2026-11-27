@@ -7,6 +7,7 @@ from .models import (
     Admission,
     Charge,
     Denied,
+    DialoguePin,
     Event,
     Failure,
     Granted,
@@ -56,14 +57,26 @@ def _live(state: Snapshot, session: Session, now: float) -> bool:
 
 
 def _prune(state: Snapshot, now: float) -> Snapshot:
+    active_dialogues: Final = frozenset((op.client, op.dialogue) for op in state.operations)
     return state.model_copy(
         update={
-            "sessions": tuple(s for s in state.sessions if _live(state, s, now)),
+            "sessions": tuple(
+                _prune_dialogue_pins(s, active_dialogues, now) for s in state.sessions if _live(state, s, now)
+            ),
             "charges": tuple(
                 c for c in state.charges if c.settled_at is None or max(c.created_at, c.settled_at) > now - 60
             ),
         }
     )
+
+
+def _prune_dialogue_pins(session: Session, active: frozenset[tuple[str, str | None]], now: float) -> Session:
+    pins: Final = tuple(
+        pin
+        for pin in session.dialogue_pins
+        if now < pin.last_activity + IDLE_SECONDS or (session.client, pin.dialogue) in active
+    )
+    return session if pins == session.dialogue_pins else session.model_copy(update={"dialogue_pins": pins})
 
 
 def _charges(state: Snapshot, scope: str) -> tuple[Charge, ...]:
@@ -140,27 +153,27 @@ def _ordered_primaries(state: Snapshot, config: PoolConfig) -> tuple[Resource, .
 
 
 def _choose(
-    state: Snapshot, config: PoolConfig, request: Admission, session: Session | None, now: float
+    state: Snapshot, config: PoolConfig, request: Admission, session: Session | None, pinned: str | None, now: float
 ) -> Resource | None:
     operations: Final = _active(state, request.client)
     active: Final = any(in_flight(op, config, now) for op in operations)
     if session is not None and session.resource is None and active:
         return None
-    if session is not None and session.pinned_upstream is not None:
+    if pinned is not None:
+        deployments: Final = config.upstream_deployments(pinned)
+        if any(in_flight(op, config, now) and op.resource not in deployments for op in operations):
+            return None
         return next(
             (
                 r
                 for r in config.selectable
-                if r.upstream_id == session.pinned_upstream and _resource_available(state, config, r, request, now)
+                if r.id in deployments and _resource_available(state, config, r, request, now)
             ),
             None,
         )
     previous: Final = next((r for r in config.resources if session is not None and r.id == session.resource), None)
     prefer_primary: Final = (
-        previous is not None
-        and any(r.upstream_id == previous.upstream_id for r in config.fallbacks)
-        and not operations
-        and not request.requires_binding
+        previous is not None and any(r.upstream_id == previous.upstream_id for r in config.fallbacks) and not operations
     )
     if previous is not None and not prefer_primary:
         siblings: Final = tuple(r for r in config.selectable if r.upstream_id == previous.upstream_id)
@@ -168,11 +181,7 @@ def _choose(
         if selected is not None:
             return selected
         sibling_ids: Final = frozenset(r.id for r in siblings)
-        if (
-            request.requires_binding
-            or any(h.status == "ready" and h.resource in sibling_ids for h in state.health)
-            or active
-        ):
+        if any(h.status == "ready" and h.resource in sibling_ids for h in state.health) or active:
             return None
     return next(
         (
@@ -209,6 +218,14 @@ def _routing_model(config: PoolConfig, model: str | None) -> str | None:
     return model if model in config.models else None
 
 
+def _pinned_upstream(session: Session | None, dialogue: str | None) -> str | None:
+    if session is None:
+        return None
+    if dialogue is None:
+        return session.pinned_upstream
+    return next((pin.upstream for pin in session.dialogue_pins if pin.dialogue == dialogue), None)
+
+
 def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float) -> Outcome:
     if not catalog_is_current(state, config, now):
         return Denied(state=state, failure=unavailable())
@@ -221,7 +238,8 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         if repeated.client != request.client or not in_flight(repeated, config, now):
             return Denied(state=state, failure=unavailable())
         return Granted(state=current, resource=repeated.resource, operation=repeated.id)
-    if request.requires_binding and (session is None or session.resource is None):
+    pinned: Final = _pinned_upstream(session, request.dialogue)
+    if request.requires_binding and pinned is None:
         return Denied(
             state=state,
             failure=Failure(
@@ -244,15 +262,14 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
                 code="client_rate_limit_exceeded", status=429, message="Client rate limit exceeded", retry_after=60
             ),
         )
-    resource: Final = _choose(current, config, request, session, now)
+    resource: Final = _choose(current, config, request, session, pinned, now)
     if resource is None:
         model: Final = _routing_model(config, request.model)
         return Denied(state=_count_routing(state, model, "exhausted"), failure=exhausted())
     fallback_transition: Final = (
         config.is_fallback(resource.id)
         and (session is None or session.resource is None or not config.is_fallback(session.resource))
-        and not request.requires_binding
-        and (session is None or session.pinned_upstream is None)
+        and pinned is None
     )
     bound: Final = Session(
         client=request.client,
@@ -262,6 +279,7 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         last_activity=session.last_activity if session else now,
         established=session.established if session else False,
         pinned_upstream=session.pinned_upstream if session is not None else None,
+        dialogue_pins=session.dialogue_pins if session is not None else (),
     )
     operation: Final = Operation(
         id=request.operation,
@@ -274,6 +292,7 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         counted=not request.needs_count,
         fallback_transition_model=_routing_model(config, request.model) if fallback_transition else None,
         pending_pin=resource.upstream_id if request.pin_upstream else None,
+        dialogue=request.dialogue,
     )
     client_charge: Final = (
         ()
@@ -356,6 +375,18 @@ def reserve_counted_tokens(
     )
 
 
+def _pin_dialogue(session: Session, active: Operation, now: float) -> Session:
+    if session.client != active.client or session.generation != active.generation or active.pending_pin is None:
+        return session
+    if active.dialogue is None:
+        return session.model_copy(update={"pinned_upstream": session.pinned_upstream or active.pending_pin})
+    upstream: Final = _pinned_upstream(session, active.dialogue) or active.pending_pin
+    pins: Final = tuple(pin for pin in session.dialogue_pins if pin.dialogue != active.dialogue)
+    return session.model_copy(
+        update={"dialogue_pins": (*pins, DialoguePin(dialogue=active.dialogue, upstream=upstream, last_activity=now))}
+    )
+
+
 def start(state: Snapshot, operation: str, now: float) -> Snapshot:
     active: Final = next((op for op in state.operations if op.id == operation), None)
     if active is None or active.quarantined or not active.counted:
@@ -370,12 +401,7 @@ def start(state: Snapshot, operation: str, now: float) -> Snapshot:
     )
     return counted.model_copy(
         update={
-            "sessions": tuple(
-                s.model_copy(update={"pinned_upstream": s.pinned_upstream or active.pending_pin})
-                if s.client == active.client and s.generation == active.generation
-                else s
-                for s in state.sessions
-            ),
+            "sessions": tuple(_pin_dialogue(s, active, now) for s in state.sessions),
             "operations": tuple(
                 op.model_copy(update={"started": True, "heartbeat": now}) if op.id == operation else op
                 for op in state.operations
@@ -431,9 +457,15 @@ def complete(
 
 
 def _finish_session(session: Session, active: Operation, still_active: bool, now: float) -> Session:
-    if session.client != active.client or session.generation != active.generation or still_active:
+    if session.client != active.client or session.generation != active.generation:
         return session
-    return session.model_copy(update={"last_activity": now, "established": True})
+    pins: Final = tuple(
+        pin.model_copy(update={"last_activity": now}) if pin.dialogue == active.dialogue and active.started else pin
+        for pin in session.dialogue_pins
+    )
+    if still_active:
+        return session.model_copy(update={"dialogue_pins": pins})
+    return session.model_copy(update={"last_activity": now, "established": True, "dialogue_pins": pins})
 
 
 def _settle(charge: Charge, operation: Operation, resource: Resource, now: float | None, actual: int | None) -> Charge:

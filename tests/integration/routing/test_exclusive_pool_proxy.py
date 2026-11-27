@@ -865,14 +865,17 @@ def test_messages_use_local_estimates_and_reject_real_budget_overflow(
 @pytest.mark.parametrize("rig", ["anthropic"], indirect=True)
 def test_messages_server_references_pin_the_account_and_block_cross_account_fallback(rig: Rig) -> None:
     key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    original: Final = {"user_id": json.dumps({"device_id": "desktop", "session_id": "original-dialogue"})}
+    fresh: Final = {"user_id": json.dumps({"device_id": "desktop", "session_id": "fresh-dialogue"})}
     try:
-        unbound: Final = rig.messages(key, "desktop", container="container-one")
+        unbound: Final = rig.messages(key, "desktop", container="container-one", metadata=original)
         assert unbound.status_code == 409, unbound.text
         assert rig.calls.empty()
         assert rig.counts.empty()
         created: Final = rig.messages(
             key,
             "desktop",
+            metadata=original,
             tools=[
                 {
                     "type": "code_execution_20250825",
@@ -886,6 +889,7 @@ def test_messages_server_references_pin_the_account_and_block_cross_account_fall
         failed: Final = rig.messages(
             key,
             "new-desktop-session",
+            metadata=original,
             container="container-one",
             messages=[
                 {
@@ -904,7 +908,13 @@ def test_messages_server_references_pin_the_account_and_block_cross_account_fall
             }
         ]
         assert rig.payloads.get(timeout=5)["container"] == "container-one"
-        retry: Final = rig.messages(key, "third-desktop-session", container="container-one")
+        plaintext: Final = rig.messages(key, "desktop", metadata=fresh)
+        assert plaintext.status_code == 200, plaintext.text
+        alternate: Final = rig.calls.get(timeout=5)
+        assert alternate != resource
+        unbound_on_alternate: Final = rig.messages(key, "desktop", container="container-one", metadata=fresh)
+        assert unbound_on_alternate.status_code == 409, unbound_on_alternate.text
+        retry: Final = rig.messages(key, "third-desktop-session", container="container-one", metadata=original)
         assert retry.status_code == 503, retry.text
         assert rig.calls.empty()
         assert rig.counts.empty()

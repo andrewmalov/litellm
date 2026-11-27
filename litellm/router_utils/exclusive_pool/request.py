@@ -42,6 +42,7 @@ class Ticket(FrozenModel):
     needs_count: bool = False
     pin_upstream: bool = False
     requires_binding: bool = False
+    dialogue: str | None = None
     anthropic: bool = False
     probe: bool = False
     tokens: int = 1

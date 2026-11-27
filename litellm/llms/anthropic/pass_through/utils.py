@@ -39,10 +39,15 @@ def prompt_cache_key_from_user_id(user_id: object) -> str | None:
     a conversation. Keying the provider cache on it pins every parallel session and subagent of that
     person to one slot, which caches worse than the provider's own prompt-prefix hashing does.
     """
+    session_id: Final = claude_code_session_id(user_id)
+    return session_id[:OPENAI_MAX_PROMPT_CACHE_KEY_LENGTH] if session_id else None
+
+
+def claude_code_session_id(user_id: object) -> str | None:
     if not isinstance(user_id, str):
         return None
     try:
-        return _ClaudeCodeUserId.model_validate_json(user_id).session_id[:OPENAI_MAX_PROMPT_CACHE_KEY_LENGTH] or None
+        return _ClaudeCodeUserId.model_validate_json(user_id).session_id or None
     except ValidationError:
         return None
 

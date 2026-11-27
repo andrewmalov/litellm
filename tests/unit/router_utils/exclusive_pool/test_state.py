@@ -287,6 +287,88 @@ def test_pinned_account_cannot_fallback_after_failure_even_for_plain_text() -> N
     assert expired.failure.code == "pool_reference_binding_required"
 
 
+def test_a_failed_pinned_dialogue_does_not_block_another_dialogue_on_the_same_key() -> None:
+    from litellm.router_utils.exclusive_pool.recovery import ErrorPolicy, fail
+
+    cfg: Final = config()
+    first: Final = acquire(
+        empty_state(cfg), cfg, request("one").model_copy(update={"dialogue": "original", "pin_upstream": True}), now=0
+    )
+    broken: Final = fail(
+        start(first.state, "one", now=0),
+        cfg,
+        "one",
+        ErrorPolicy(kind="cooldown", confirmed_end=True, base_seconds=10),
+        now=1,
+        jitter=0,
+    )
+    other: Final = request("one", operation="new").model_copy(update={"dialogue": "other"})
+    moved: Final = acquire(broken, cfg, other, now=2)
+    assert isinstance(moved, Granted) and moved.resource == "b"
+    finished: Final = complete(start(moved.state, "new", now=2), cfg, "new", now=3)
+    reference: Final = request("one", operation="ref").model_copy(
+        update={"dialogue": "original", "requires_binding": True}
+    )
+    denied: Final = acquire(finished, cfg, reference, now=4)
+    assert isinstance(denied, Denied) and denied.failure.code == "endpoint_pool_exhausted"
+    independent: Final = acquire(
+        finished, cfg, reference.model_copy(update={"client": "two", "dialogue": "original"}), now=4
+    )
+    assert isinstance(independent, Denied) and independent.failure.code == "pool_reference_binding_required"
+    recovered: Final = finished.model_copy(update={"health": empty_state(cfg).health})
+    returning: Final = acquire(recovered, cfg, reference, now=12)
+    assert isinstance(returning, Granted) and returning.resource == "a"
+
+
+def test_other_dialogue_activity_does_not_extend_a_server_binding() -> None:
+    cfg: Final = config()
+    initial: Final = Admission(
+        client="one",
+        device="device",
+        operation="create",
+        tokens=10,
+        eligible=("a", "b"),
+        dialogue="original",
+        pin_upstream=True,
+    )
+    created: Final = acquire(empty_state(cfg), cfg, initial, now=0)
+    pinned: Final = complete(start(created.state, "create", now=0), cfg, "create", now=1)
+    other: Final = Admission(
+        client="one", device="device", operation="new", tokens=10, eligible=("a", "b"), dialogue="other"
+    )
+    accepted: Final = acquire(pinned, cfg, other, now=899)
+    renewed: Final = complete(start(accepted.state, "new", now=899), cfg, "new", now=900)
+    reference: Final = initial.model_copy(update={"operation": "ref", "requires_binding": True})
+    still_live: Final = acquire(renewed, cfg, reference, now=900)
+    assert isinstance(still_live, Granted) and still_live.resource == "a"
+    expired: Final = acquire(renewed, cfg, reference, now=901)
+    assert isinstance(expired, Denied) and expired.failure.code == "pool_reference_binding_required"
+
+
+def test_key_level_pin_is_only_used_by_requests_without_a_dialogue_id() -> None:
+    from litellm.router_utils.exclusive_pool.models import Session
+
+    cfg: Final = config()
+    legacy: Final = Session.model_validate(
+        {
+            "client": "one",
+            "device": "device",
+            "generation": "legacy",
+            "resource": "a",
+            "last_activity": 0,
+            "established": True,
+            "pinned_upstream": "physical-a",
+        }
+    )
+    initial: Final = empty_state(cfg)
+    cooling: Final = initial.health[0].model_copy(update={"status": "cooldown"})
+    migrated: Final = initial.model_copy(update={"sessions": (legacy,), "health": (cooling, *initial.health[1:])})
+    anonymous: Final = acquire(migrated, cfg, request("one"), now=1)
+    assert isinstance(anonymous, Denied) and anonymous.failure.code == "endpoint_pool_exhausted"
+    identified: Final = acquire(migrated, cfg, request("one").model_copy(update={"dialogue": "new"}), now=1)
+    assert isinstance(identified, Granted) and identified.resource == "b"
+
+
 def test_provider_count_reservation_is_atomic_and_checks_both_quota_scopes() -> None:
     from litellm.router_utils.exclusive_pool.state import reserve_counted_tokens
 
