@@ -387,7 +387,12 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
                 for h in current.health
             ),
             "charges": (
-                *current.charges,
+                *tuple(
+                    c.model_copy(update={"settled_at": None, "tokens": request.tokens})
+                    if request.logical is not None and c.scope == f"client:{request.client}" and c.operation == logical
+                    else c
+                    for c in current.charges
+                ),
                 *client_charge,
                 Charge(
                     scope=f"resource:{resource.scope}",

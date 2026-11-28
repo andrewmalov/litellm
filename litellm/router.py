@@ -8074,6 +8074,10 @@ class Router:
         except Exception as e:
             if is_guardrail_intervention(e):
                 raise
+            if isinstance(e, litellm.RateLimitError):
+                failover: Final = await self._exclusive_pool_failover_kwargs(kwargs, e)
+                if failover is not None:
+                    return await self._run_exclusive_pool_failover(original_function, args, failover, e)
             current_attempt = None
             original_exception = e
             deployment_num_retries: Final = getattr(e, "num_retries", None)
@@ -8232,6 +8236,58 @@ class Router:
                 setattr(original_exception, "num_retries", actual_retries_attempted)
 
             raise original_exception
+
+    async def _exclusive_pool_failover_kwargs(
+        self, request: Mapping[str, object], error: litellm.RateLimitError
+    ) -> Mapping[str, object] | None:
+        from litellm.router_utils.exclusive_pool.request import TICKET_KEY
+
+        failed: Final = getattr(error, "failed_deployment_id", None)
+        if not isinstance(failed, str):
+            return None
+        metadata: Final = request.get("metadata")
+        litellm_metadata: Final = request.get("litellm_metadata")
+        carriers: Final = tuple(
+            item for item in (metadata, litellm_metadata) if isinstance(item, dict) and TICKET_KEY in item
+        )
+        if not carriers:
+            return None
+        from litellm.router_utils.exclusive_pool.callback import ExclusiveEndpointPool
+        from litellm.router_utils.exclusive_pool.recovery import dario_parked
+
+        if not dario_parked(error):
+            return None
+        pool: Final = next(
+            (callback for callback in litellm.callbacks if isinstance(callback, ExclusiveEndpointPool)), None
+        )
+        if pool is None:
+            return None
+        ticket: Final = await pool.dario_failover_ticket(request, failed)
+        if ticket is None:
+            return None
+        for carrier in carriers:
+            carrier[TICKET_KEY] = ticket.model_dump()
+        retry_kwargs: Final = dict(request)
+        clear_pre_routing_selection(retry_kwargs)
+        record_retry_attempt(retry_kwargs, attempted_retries=1, max_retries=1)
+        return retry_kwargs
+
+    async def _run_exclusive_pool_failover(
+        self,
+        original_function: Callable[..., object],
+        args: tuple[object, ...],
+        kwargs: Mapping[str, object],
+        original_error: litellm.RateLimitError,
+    ) -> object:
+        from litellm.router_utils.exclusive_pool.request import PoolProxyException
+
+        try:
+            response: Final = await self.make_call(original_function, *args, **kwargs)
+        except PoolProxyException as declined:
+            if declined.failure.code != "endpoint_pool_exhausted":
+                raise
+            raise original_error from declined
+        return add_retry_headers_to_response(response=response, attempted_retries=1, max_retries=1)
 
     async def make_call(self, original_function: Any, *args, **kwargs):
         """

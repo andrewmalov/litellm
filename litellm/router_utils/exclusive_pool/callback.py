@@ -35,6 +35,7 @@ from .request import (
     DeploymentView,
     MetadataCarriers,
     RequestView,
+    SignedTicket,
     StreamProgress,
     Ticket,
     actual_usage,
@@ -150,6 +151,27 @@ class ExclusiveEndpointPool(CustomLogger):
             "cache": {"no-cache": True},
         }
 
+    async def dario_failover_ticket(self, request: Mapping[str, object], deployment: str) -> SignedTicket | None:
+        ticket: Final = self._ticket(request)
+        if ticket is None or ticket.pin_upstream or ticket.requires_binding or ticket.logical is not None:
+            return None
+        snapshot: Final = await self.store.read()
+        if isinstance(snapshot, Failure):
+            return None
+        config: Final = self.store.config.resolve(snapshot)
+        failed: Final = next((r for r in config.resources if r.id == deployment), None)
+        if failed is None or not any(
+            charge.operation == ticket.operation
+            and charge.scope == f"resource:{failed.scope}"
+            and charge.settled_at is not None
+            and charge.tokens == 0
+            for charge in snapshot.charges
+        ):
+            return None
+        return ticket.model_copy(
+            update={"logical": ticket.operation, "operation": uuid.uuid4().hex, "excluded_upstream": failed.upstream_id}
+        ).sign(self.secret)
+
     async def async_filter_deployments(
         self,
         model: str,
@@ -164,15 +186,22 @@ class ExclusiveEndpointPool(CustomLogger):
             return [dict(deployment) for deployment in healthy_deployments]
         if ticket is None:
             raise_public(state.unavailable())
-        eligible: Final = tuple(
+        excluded: Final[frozenset[str]] = (
+            config.upstream_deployments(ticket.excluded_upstream)
+            if ticket.excluded_upstream is not None
+            else frozenset()
+        )
+        candidates: Final = tuple(
             DeploymentView.model_validate(deployment).model_info.id for deployment in healthy_deployments
         )
+        eligible: Final = tuple(candidate for candidate in candidates if candidate not in excluded)
         outcome: Final = await self.store.acquire(
             Admission(
                 model=model,
                 client=ticket.client,
                 device=ticket.device,
                 operation=ticket.operation,
+                logical=ticket.logical,
                 tokens=ticket.tokens,
                 limits=ticket.limits,
                 eligible=eligible,

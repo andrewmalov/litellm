@@ -124,6 +124,19 @@ def rig(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Rig]:
         payloads.put(TypeAdapter(dict[str, JsonValue]).validate_python(body))
         calls.put(resource)
         upstream_models.put(body["model"])
+        messages_text: Final = str(body["messages"])
+        quota_on_first: Final = "quota-fixture" in messages_text and resource == config.primaries[0].id
+        quota_on_both: Final = "quota-fixture-both" in messages_text and resource == config.primaries[1].id
+        if quota_on_first or quota_on_both:
+            return JSONResponse(
+                status_code=429,
+                headers=(
+                    {"retry-after": "600", "x-dario-upstream-rejection": "pool_parked"}
+                    if "quota-fixture-unmarked" not in messages_text
+                    else {"retry-after": "600"}
+                ),
+                content={"error": {"type": "rate_limit_error", "message": "Nothing was sent upstream."}},
+            )
         if resource == config.primaries[0].id and fail_primary.is_set():
             fail_primary.clear()
             return JSONResponse(status_code=503, content={"error": {"message": "overloaded", "type": "server_error"}})
@@ -386,6 +399,46 @@ def test_completed_stream_releases_its_inflight_slot(rig: Rig) -> None:
         next_call: Final = rig.chat(key, "stream-device")
         assert next_call.status_code == 200, next_call.text
         assert next_call.headers["x-litellm-model-id"] == streamed.headers["x-litellm-model-id"]
+    finally:
+        rig.proxy.post("/key/delete", {"keys": [key]})
+
+
+@pytest.mark.parametrize(
+    ("rig", "surface", "message", "expected_status", "attempts"),
+    [
+        (False, "chat", "quota-fixture", 200, 2),
+        ("anthropic", "messages", "quota-fixture", 200, 2),
+        ("anthropic", "stream", "quota-fixture", 200, 2),
+        ("anthropic", "messages", "quota-fixture-both", 429, 2),
+        ("anthropic", "messages", "quota-fixture-unmarked", 429, 1),
+        ("anthropic", "server-tool", "quota-fixture", 429, 1),
+    ],
+    indirect=["rig"],
+)
+def test_dario_local_429_switches_upstream_within_the_request(
+    rig: Rig, surface: str, message: str, expected_status: int, attempts: int
+) -> None:
+    key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+    rig.stream_release.set()
+    try:
+        messages: Final = [{"role": "user", "content": message}]
+        send: Final = rig.chat if surface == "chat" else rig.messages
+        tools: Final = {"tools": [{"type": "code_execution_20250825", "name": "code_execution"}]}
+        response: Final = send(
+            key, "device", messages=messages, stream=surface == "stream", **(tools if surface == "server-tool" else {})
+        )
+        assert response.status_code == expected_status, response.text
+        assert tuple(rig.calls.get(timeout=5) for _ in range(attempts)) == tuple(
+            resource.id for resource in rig.config.primaries[:attempts]
+        )
+        assert rig.calls.empty()
+        with Redis(host=os.environ["REDIS_HOST"], port=int(os.environ["REDIS_PORT"])) as redis:
+            state_key: Final = f"litellm:exclusive-pool:{{{rig.config.pool_id}}}:state"
+            snapshot: Final = Snapshot.model_validate_json(TypeAdapter(bytes).validate_python(redis.get(state_key)))
+            client_charges: Final = tuple(charge for charge in snapshot.charges if charge.scope.startswith("client:"))
+            assert len(client_charges) == 1
+        if surface == "stream":
+            assert "message_stop" in response.text
     finally:
         rig.proxy.post("/key/delete", {"keys": [key]})
 

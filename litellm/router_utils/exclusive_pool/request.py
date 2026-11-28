@@ -36,6 +36,8 @@ class Ticket(FrozenModel):
     client: str
     device: str
     resource: str
+    logical: str | None = None
+    excluded_upstream: str | None = None
     needs_count: bool = False
     pin_upstream: bool = False
     requires_binding: bool = False

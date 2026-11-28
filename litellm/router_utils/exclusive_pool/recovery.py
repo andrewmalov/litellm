@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Final, Literal
@@ -10,6 +11,7 @@ import openai
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 import litellm
+from litellm.exceptions import RateLimitErrorCategory
 
 from .models import (
     DarioHealth,
@@ -22,7 +24,7 @@ from .models import (
 )
 from .state import DARIO_HEALTH_MAX_AGE_SECONDS, complete, quarantine, record_event, reject
 
-_RESPONSE: Final = TypeAdapter(httpx.Response, config=ConfigDict(arbitrary_types_allowed=True))
+_RESPONSE: Final = TypeAdapter[httpx.Response](httpx.Response, config=ConfigDict(arbitrary_types_allowed=True))
 _CODE: Final = TypeAdapter[str | None](str | None)
 
 
@@ -34,6 +36,7 @@ class ErrorPolicy:
     retry_after: str | None = None
     shared_quota: bool = False
     account_on_hold: bool = False
+    unsent: bool = False
 
 
 def retry_after(value: str | None, now: float) -> float:
@@ -49,6 +52,24 @@ def retry_after(value: str | None, now: float) -> float:
         return max(0, parsed.timestamp() - now) if parsed.tzinfo is not None else 0
     except (ValueError, TypeError, OverflowError):
         return 0
+
+
+def _rate_limit_header(exception: litellm.RateLimitError, name: str) -> str | None:
+    headers: Final[object] = getattr(exception, "litellm_response_headers", None)
+    if isinstance(headers, httpx.Headers):
+        return headers.get(name) or _RESPONSE.validate_python(exception.response).headers.get(name)
+    if isinstance(headers, Mapping):
+        value: Final[object] = headers.get(name)
+        if isinstance(value, str):
+            return value
+    return _RESPONSE.validate_python(exception.response).headers.get(name)
+
+
+def dario_parked(exception: litellm.RateLimitError) -> bool:
+    return (
+        exception.category == RateLimitErrorCategory.VENDOR_RATE_LIMIT
+        and _rate_limit_header(exception, "x-dario-upstream-rejection") == "pool_parked"
+    )
 
 
 def classify(exception: Exception) -> ErrorPolicy:
@@ -69,8 +90,9 @@ def classify(exception: Exception) -> ErrorPolicy:
             kind="cooldown",
             confirmed_end=True,
             base_seconds=30,
-            retry_after=_CODE.validate_python(_RESPONSE.validate_python(exception.response).headers.get("retry-after")),
+            retry_after=_rate_limit_header(exception, "retry-after"),
             shared_quota=True,
+            unsent=dario_parked(exception),
         )
     if isinstance(
         exception, (litellm.BadRequestError, litellm.ContentPolicyViolationError, litellm.ContextWindowExceededError)
@@ -126,7 +148,7 @@ def fail(
     if policy.kind == "client":
         return reject(state, config, operation, now)
     ended: Final = (
-        complete(state, config, operation, now, successful=False)
+        complete(state, config, operation, now, 0 if policy.unsent else None, successful=False)
         if policy.confirmed_end
         else quarantine(state, operation)
     )
