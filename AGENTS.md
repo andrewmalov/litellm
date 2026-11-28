@@ -50,6 +50,8 @@ If you ever write any human-facing text (pull requests, issues, commit messages,
 - don't use →. Instead, prefer not to use arrows, and if need be, use -> instead
 - use plain, simple, everyday engineering language: the common phrase engineers actually say over rare compact phrasing, in grammatically complete sentences. When explicitly asked to use bullets or ordered lists and structure legitimately helps the reader, prefer nested bullets (any depth is fine) over dense lines in a flat structure
 
+Never verify a production deployment or service with synthetic requests that could reach an Anthropic upstream, including indirectly through LiteLLM or Dario. This applies to manual smoke tests, automated health and recovery checks, and proof-of-fix requests. It takes precedence over the real-provider testing guidance above. To reduce the risk of account bans, verify production using local health endpoints that cannot call the upstream, metrics, logs, and observations from real client traffic. Run synthetic inference on an isolated test environment with no route to production Anthropic accounts
+
 Don't hesitate to use values in .env to get needed API keys and other secrets, as long as you never add them to conversation history, commit them, or include them in GitHub issues / PRs
 
 Python max line length is 120, not 88
