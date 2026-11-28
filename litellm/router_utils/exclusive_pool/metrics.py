@@ -54,7 +54,10 @@ def render_metrics(snapshot: Snapshot, config: PoolConfig, now: float, tokens: i
         "exclusive_pool_upstream_assigned", "Upstream has a live session assignment", labels, registry=registry
     )
     retry: Final = Gauge(
-        "exclusive_pool_upstream_retry_timestamp_seconds", "Scheduled next check", labels, registry=registry
+        "exclusive_pool_upstream_retry_timestamp_seconds",
+        "Earliest client request eligible for recovery",
+        labels,
+        registry=registry,
     )
     current: Final = _prune(snapshot, now)
     resolved: Final = config.resolve(snapshot)

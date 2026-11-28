@@ -12,7 +12,7 @@ from typing import Final
 
 import anyio
 from opentelemetry.trace import Span
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 from redis.asyncio import Redis
 
 import litellm
@@ -29,7 +29,7 @@ from .context import count_input_tokens
 from .database import load_catalog
 from .discovery import CatalogRow
 from .models import Admission, Denied, Failure, Granted, Limits, Outcome, PoolConfig, Snapshot
-from .recovery import ErrorPolicy, classify, fail, probe_success
+from .recovery import ErrorPolicy, classify, fail
 from .request import (
     TICKET_KEY,
     DeploymentView,
@@ -41,14 +41,12 @@ from .request import (
     has_upstream_override,
     marked_model,
     raise_public,
-    recovery_request,
     safe_id,
 )
 from .store import RedisPoolStore
 from .worker import RecoveryWorker
 
 _LOGGER: Final = logging.getLogger(__name__)
-_MESSAGES: Final = TypeAdapter(list[AllMessageValues])
 
 
 class ExclusiveEndpointPool(CustomLogger):
@@ -279,7 +277,7 @@ class ExclusiveEndpointPool(CustomLogger):
             if ticket.is_adapter_call(call_type):
                 return Granted(state=snapshot, resource=operation.resource, operation=operation.id)
             return Denied(state=snapshot, failure=state.unavailable())
-        started: Final = state.start(snapshot, ticket.operation, now)
+        started: Final = state.start(snapshot, ticket.operation, now, self.store.config.resolve(snapshot))
         if not any(op.id == operation.id and op.started for op in started.operations):
             return Denied(state=snapshot, failure=state.unavailable())
         return Granted(state=started, resource=operation.resource, operation=operation.id)
@@ -388,10 +386,8 @@ class ExclusiveEndpointPool(CustomLogger):
 
     async def _complete(self, ticket: Ticket, usage: int | None) -> None:
         await self.store.transact(
-            lambda snapshot, now: (
-                probe_success(snapshot, self.store.config.resolve(snapshot), ticket.operation, now)
-                if ticket.probe
-                else state.complete(snapshot, self.store.config.resolve(snapshot), ticket.operation, now, usage)
+            lambda snapshot, now: state.complete(
+                snapshot, self.store.config.resolve(snapshot), ticket.operation, now, usage
             )
         )
 
@@ -430,7 +426,7 @@ class ExclusiveEndpointPool(CustomLogger):
     def _ensure_recovery(self) -> None:
         if self._recovery is not None and not self._recovery.done():
             return
-        task: Final = asyncio.create_task(RecoveryWorker(self.store, self._run_probe, self._refresh_catalog).run())
+        task: Final = asyncio.create_task(RecoveryWorker(self.store, self._refresh_catalog).run())
         self._recovery = task
         self._tasks = self._tasks | frozenset((task,))
         task.add_done_callback(self._forget_task)
@@ -473,25 +469,6 @@ class ExclusiveEndpointPool(CustomLogger):
         if isinstance(snapshot, Failure):
             raise_public(snapshot)
         return self.store.config.resolve(snapshot)
-
-    async def _run_probe(self, ticket: Ticket) -> bool:
-        from litellm.proxy.proxy_server import llm_router
-
-        if llm_router is None:
-            return False
-        self._begin_heartbeat(ticket.operation)
-        probe: Final = recovery_request(ticket.resource)
-        await llm_router.acompletion(  # pyright: ignore[reportUnknownMemberType]  # Router exposes untyped provider kwargs
-            model=ticket.resource,
-            messages=_MESSAGES.validate_python(probe.messages),
-            max_tokens=1,
-            metadata={TICKET_KEY: ticket.sign(self.secret).model_dump()},
-            num_retries=0,
-            max_retries=0,
-            disable_fallbacks=True,
-            cache={"no-cache": True},
-        )
-        return True
 
     async def aclose(self) -> None:
         tasks: Final = tuple(self._tasks)

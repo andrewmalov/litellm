@@ -50,8 +50,6 @@ def test_configuration_change_requires_all_old_operations_to_end() -> None:
 
 
 def test_confirming_unknown_probe_end_requires_another_probe_before_ready() -> None:
-    from litellm.router_utils.exclusive_pool.recovery import claim_probe
-
     config: Final = PoolConfig(
         pool_id="p",
         models=("m",),
@@ -63,12 +61,15 @@ def test_confirming_unknown_probe_end_requires_another_probe_before_ready() -> N
     cooled: Final = original.model_copy(
         update={"health": tuple(h.model_copy(update={"status": "cooldown"}) for h in original.health)}
     )
-    probe: Final = claim_probe(cooled, config, "a", "probe", now=1)
+    request: Final = Admission(client="c", device="d", operation="recover", tokens=1, eligible=("a",))
+    probe: Final = acquire(cooled, config, request, now=1)
     assert isinstance(probe, Granted)
-    confirmed: Final = confirm_idle(quarantine(start(probe.state, "probe", now=1), "probe"), config, "probe", now=100)
+    confirmed: Final = confirm_idle(
+        quarantine(start(probe.state, "recover", now=1), "recover"), config, "recover", now=100
+    )
     assert not isinstance(confirmed, Denied)
     assert confirmed.health[0].status == "cooldown"
-    assert isinstance(claim_probe(confirmed, config, "a", "new-probe", now=101), Granted)
+    assert isinstance(acquire(confirmed, config, request.model_copy(update={"operation": "next"}), now=101), Granted)
 
 
 def test_static_to_discovery_migration_preserves_bindings_health_and_quota_history() -> None:

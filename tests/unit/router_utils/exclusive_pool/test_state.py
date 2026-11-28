@@ -422,7 +422,7 @@ def test_legacy_pin_does_not_block_portable_requests() -> None:
         }
     )
     initial: Final = empty_state(cfg)
-    cooling: Final = initial.health[0].model_copy(update={"status": "cooldown"})
+    cooling: Final = initial.health[0].model_copy(update={"status": "cooldown", "retry_at": 60})
     migrated: Final = initial.model_copy(update={"sessions": (legacy,), "health": (cooling, *initial.health[1:])})
     anonymous: Final = acquire(migrated, cfg, request("one"), now=1)
     assert isinstance(anonymous, Granted) and anonymous.resource == "b"

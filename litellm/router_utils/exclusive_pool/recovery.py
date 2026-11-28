@@ -11,22 +11,16 @@ from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 import litellm
 
-from .context import estimate_input_tokens
 from .models import (
-    Charge,
-    Denied,
+    DarioHealth,
     Event,
-    Failure,
     FrozenModel,
-    Granted,
     Health,
     Operation,
-    Outcome,
     PoolConfig,
     Snapshot,
 )
-from .request import recovery_request
-from .state import complete, exhausted, has_capacity, in_flight, quarantine, record_event, reject
+from .state import DARIO_HEALTH_MAX_AGE_SECONDS, complete, quarantine, record_event, reject
 
 _RESPONSE: Final = TypeAdapter(httpx.Response, config=ConfigDict(arbitrary_types_allowed=True))
 _CODE: Final = TypeAdapter[str | None](str | None)
@@ -39,6 +33,7 @@ class ErrorPolicy:
     base_seconds: float = 15
     retry_after: str | None = None
     shared_quota: bool = False
+    account_on_hold: bool = False
 
 
 def retry_after(value: str | None, now: float) -> float:
@@ -57,6 +52,8 @@ def retry_after(value: str | None, now: float) -> float:
 
 
 def classify(exception: Exception) -> ErrorPolicy:
+    if isinstance(exception, openai.APIError) and _provider_code(exception) == "account_on_hold":
+        return ErrorPolicy(kind="disabled", confirmed_end=True, account_on_hold=True)
     if isinstance(exception, (litellm.Timeout, litellm.APIConnectionError, openai.APIConnectionError)):
         return ErrorPolicy(kind="cooldown", confirmed_end=False)
     if isinstance(exception, (litellm.AuthenticationError, litellm.PermissionDeniedError, litellm.NotFoundError)):
@@ -126,9 +123,13 @@ def fail(
     active: Final = next((op for op in state.operations if op.id == operation), None)
     if active is None:
         return state
-    if policy.kind == "client" and not active.probe:
+    if policy.kind == "client":
         return reject(state, config, operation, now)
-    ended: Final = complete(state, config, operation, now) if policy.confirmed_end else quarantine(state, operation)
+    ended: Final = (
+        complete(state, config, operation, now, successful=False)
+        if policy.confirmed_end
+        else quarantine(state, operation)
+    )
     resource: Final = next(r for r in config.resources if r.id == active.resource)
     affected: Final = (
         frozenset(r.id for r in config.resources if r.scope == resource.scope)
@@ -145,15 +146,17 @@ def fail(
             resource=resource.id,
         ),
     )
-    affected_primaries: Final = affected.difference(r.id for r in config.fallbacks)
+    blocked_resources: Final = (
+        affected if policy.account_on_hold else affected.difference(r.id for r in config.fallbacks)
+    )
     return audited.model_copy(
         update={
             "health": tuple(
-                _failed_health(h, active, policy, now, jitter) if h.resource in affected_primaries else h
+                _failed_health(h, active, policy, now, jitter) if h.resource in blocked_resources else h
                 for h in ended.health
             ),
             "sessions": tuple(
-                s.model_copy(update={"resource": None}) if s.resource in affected_primaries else s
+                s.model_copy(update={"resource": None}) if s.resource in blocked_resources else s
                 for s in ended.sessions
             ),
         }
@@ -161,7 +164,9 @@ def fail(
 
 
 def _failed_health(health: Health, operation: Operation, policy: ErrorPolicy, now: float, jitter: float) -> Health:
-    if health.status in ("cooldown", "disabled") and health.generation != operation.health_generation:
+    if health.account_on_hold or (
+        not policy.account_on_hold and health.status != "ready" and health.generation != operation.health_generation
+    ):
         return health
     backoff: Final = 1 << min(max(health.cycles, 0), 6)
     spread: Final = 1 + max(0, min(jitter, 0.1))
@@ -179,6 +184,8 @@ def _failed_health(health: Health, operation: Operation, policy: ErrorPolicy, no
             "status": "cooldown" if policy.kind == "client" else policy.kind,
             "retry_at": now + delay,
             "cycles": health.cycles + 1,
+            "failed_at": now,
+            "account_on_hold": policy.account_on_hold,
             "generation": operation.id,
             "success_since": None,
             "capacity": None,
@@ -186,88 +193,79 @@ def _failed_health(health: Health, operation: Operation, policy: ErrorPolicy, no
     )
 
 
-def claim_probe(state: Snapshot, config: PoolConfig, resource: str, operation: str, now: float) -> Outcome:
-    if config.is_fallback(resource) or resource not in tuple(r.id for r in config.selectable):
-        return Denied(state=state, failure=exhausted())
-    if config.discovery and (state.discovered_at is None or now - state.discovered_at >= config.heartbeat_timeout):
-        return Denied(state=state, failure=exhausted())
-    health: Final = next(h for h in state.health if h.resource == resource)
-    target: Final = next(r for r in config.resources if r.id == resource)
-    upstream_ids: Final = config.upstream_deployments(target.upstream_id)
-    scope_ids: Final = frozenset(r.id for r in config.resources if r.scope == target.scope)
-    if health.status not in ("cooldown", "disabled") or health.retry_at > now:
-        return Denied(state=state, failure=exhausted())
-    if any(op.resource in scope_ids and in_flight(op, config, now) for op in state.operations):
-        return Denied(state=state, failure=exhausted())
-    request: Final = recovery_request(resource)
-    estimate: Final = estimate_input_tokens(request, {"litellm_params": {"model": ""}})
-    if isinstance(estimate, Failure):
-        return Denied(state=state, failure=estimate)
-    tokens: Final = request.counted_reservation(estimate, 1)
-    if not has_capacity(state, config, f"resource:{target.scope}", target.limits, tokens, now, operation):
-        return Denied(state=state, failure=exhausted())
-    probe: Final = Operation(
-        id=operation,
-        logical=operation,
-        client="",
-        generation=operation,
-        resource=resource,
-        heartbeat=now,
-        probe=True,
-        health_generation=operation,
+def record_dario_health(
+    state: Snapshot, config: PoolConfig, report: DarioHealth, now: float, generation: str
+) -> Snapshot:
+    resources: Final = config.upstream_deployments(report.upstream)
+    if not resources or not now - DARIO_HEALTH_MAX_AGE_SECONDS <= report.observed_at <= now:
+        return state
+    previous: Final = next((item for item in state.dario_health if item.upstream == report.upstream), None)
+    if previous is not None and previous.observed_at >= report.observed_at:
+        return state
+    if (
+        report.status == "ok"
+        and previous is not None
+        and (
+            (previous.status == "rate_limited" and previous.retry_at > now)
+            or (previous.status == "oauth_refreshed" and now - previous.observed_at <= DARIO_HEALTH_MAX_AGE_SECONDS)
+        )
+    ):
+        return state
+    updated: Final = state.model_copy(
+        update={
+            "dario_health": (
+                *tuple(item for item in state.dario_health if item.upstream != report.upstream),
+                report,
+            )
+        }
     )
-    return Granted(
-        resource=resource,
-        operation=operation,
-        state=state.model_copy(
+    if report.status in ("unavailable", "rate_limited"):
+        return updated.model_copy(
             update={
                 "health": tuple(
-                    h.model_copy(update={"status": "probing", "generation": operation})
-                    if h.resource in upstream_ids
+                    h.model_copy(
+                        update={
+                            "status": "cooldown",
+                            "generation": generation,
+                            "retry_at": max(h.retry_at, report.retry_at)
+                            if report.status == "rate_limited"
+                            else h.retry_at,
+                        }
+                    )
+                    if h.resource in resources
+                    and h.status in ("ready", "cooldown")
+                    and not config.is_fallback(h.resource)
                     else h
                     for h in state.health
                 ),
-                "operations": (*state.operations, probe),
-                "charges": (
-                    *state.charges,
-                    Charge(
-                        scope=f"resource:{target.scope}",
-                        operation=operation,
-                        created_at=now,
-                        tokens=tokens,
-                    ),
-                ),
             }
-        ),
-    )
-
-
-def probe_success(state: Snapshot, config: PoolConfig, operation: str, now: float) -> Snapshot:
-    active: Final = next((op for op in state.operations if op.id == operation and op.probe), None)
-    if active is None:
-        return state
-    health: Final = next(h for h in state.health if h.resource == active.resource)
-    if health.status != "probing" or health.generation != active.health_generation:
-        return state
-    ended: Final = complete(state, config, operation, now)
-    target: Final = next(r for r in config.resources if r.id == active.resource)
-    upstream_ids: Final = config.upstream_deployments(target.upstream_id)
-    return ended.model_copy(
+        )
+    if report.status != "account_on_hold" or all(h.account_on_hold for h in state.health if h.resource in resources):
+        return updated
+    blocked: Final = updated.model_copy(
         update={
             "health": tuple(
                 h.model_copy(
                     update={
-                        "status": "ready",
-                        "success_since": now,
+                        "status": "disabled",
+                        "account_on_hold": True,
+                        "generation": generation,
+                        "failed_at": report.observed_at,
+                        "success_since": None,
                         "capacity": None,
                     }
                 )
-                if h.resource in upstream_ids
+                if h.resource in resources
                 else h
-                for h in ended.health
+                for h in state.health
+            ),
+            "sessions": tuple(
+                session.model_copy(update={"resource": None}) if session.resource in resources else session
+                for session in state.sessions
             ),
         }
     )
+    return record_event(blocked, config, Event(time=now, kind="upstream_disabled", resource=min(resources)))
 
 
 def enable(state: Snapshot, resource: str, generation: str) -> Snapshot:
@@ -280,7 +278,9 @@ def enable(state: Snapshot, resource: str, generation: str) -> Snapshot:
     return state.model_copy(
         update={
             "health": tuple(
-                h.model_copy(update={"status": "cooldown", "retry_at": 0, "generation": generation})
+                h.model_copy(
+                    update={"status": "cooldown", "retry_at": 0, "generation": generation, "account_on_hold": False}
+                )
                 if h.resource in affected and h.status == "disabled"
                 else h
                 for h in state.health

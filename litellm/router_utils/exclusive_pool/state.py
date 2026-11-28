@@ -25,6 +25,7 @@ from .models import (
 
 IDLE_SECONDS: Final = 900
 QUARANTINE_TIMEOUT_SECONDS: Final = 300
+DARIO_HEALTH_MAX_AGE_SECONDS: Final = 180
 
 
 def unavailable() -> Failure:
@@ -115,12 +116,47 @@ def _scope_operations(state: Snapshot, config: PoolConfig, resource: Resource) -
     return tuple(op for op in state.operations if op.resource in ids)
 
 
+def _recovery_allowed(
+    state: Snapshot, config: PoolConfig, resource: Resource, health: Health, request: Admission, now: float
+) -> bool:
+    if request.requires_binding or (health.status == "cooldown" and health.retry_at > now):
+        return False
+    if health.status == "disabled" and not any(
+        item.upstream == resource.upstream_id
+        and item.status == "oauth_refreshed"
+        and now - DARIO_HEALTH_MAX_AGE_SECONDS <= item.observed_at <= now
+        and item.observed_at > (health.failed_at if health.failed_at is not None else health.retry_at)
+        for item in state.dario_health
+    ):
+        return False
+    return health.status in ("cooldown", "disabled") and not any(
+        in_flight(op, config, now) for op in _scope_operations(state, config, resource)
+    )
+
+
+def _dario_unavailable(state: Snapshot, resource: Resource, now: float) -> bool:
+    return any(
+        item.upstream == resource.upstream_id
+        and item.status in ("unavailable", "rate_limited")
+        and (
+            now < item.retry_at
+            if item.status == "rate_limited" and item.retry_at
+            else now - DARIO_HEALTH_MAX_AGE_SECONDS <= item.observed_at <= now
+        )
+        for item in state.dario_health
+    )
+
+
 def _resource_available(
     state: Snapshot, config: PoolConfig, resource: Resource, request: Admission, now: float
 ) -> bool:
     health: Final = next(h for h in state.health if h.resource == resource.id)
     exclusive: Final = not config.is_fallback(resource.id)
-    if resource.id not in request.eligible or (exclusive and health.status != "ready"):
+    if resource.id not in request.eligible:
+        return False
+    if health.account_on_hold or _dario_unavailable(state, resource, now):
+        return False
+    if exclusive and health.status != "ready" and not _recovery_allowed(state, config, resource, health, request, now):
         return False
     limit: Final = resource.limits.parallel
     if limit is not None and sum(
@@ -181,7 +217,10 @@ def _choose(
         if selected is not None:
             return selected
         sibling_ids: Final = frozenset(r.id for r in siblings)
-        if any(h.status == "ready" and h.resource in sibling_ids for h in state.health) or active:
+        if active or (
+            not _dario_unavailable(state, previous, now)
+            and any(h.status in ("ready", "probing") and h.resource in sibling_ids for h in state.health)
+        ):
             return None
     return next(
         (
@@ -227,10 +266,20 @@ def _dialogue_pin(session: Session | None, dialogue: str | None) -> DialoguePin 
     return pin
 
 
-def _reference_routing_failure(state: Snapshot, config: PoolConfig, request: Admission, upstream: str) -> Failure:
+def _reference_routing_failure(
+    state: Snapshot, config: PoolConfig, request: Admission, upstream: str, now: float
+) -> Failure:
     matching: Final = frozenset(r.id for r in config.selectable if r.upstream_id == upstream)
     eligible: Final = matching.intersection(request.eligible)
-    if any(h.resource in eligible and (h.status == "ready" or config.is_fallback(h.resource)) for h in state.health):
+    known_available: Final = frozenset(
+        r.id for r in config.selectable if r.id in eligible and not _dario_unavailable(state, r, now)
+    )
+    if any(
+        h.resource in known_available
+        and not h.account_on_hold
+        and (h.status in ("ready", "probing") or config.is_fallback(h.resource))
+        for h in state.health
+    ):
         return Failure(
             code="pool_reference_upstream_busy",
             status=503,
@@ -285,7 +334,7 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
     resource: Final = _choose(current, config, request, session, pinned, now)
     if resource is None:
         if pinned is not None:
-            return Denied(state=state, failure=_reference_routing_failure(current, config, request, pinned))
+            return Denied(state=state, failure=_reference_routing_failure(current, config, request, pinned, now))
         model: Final = _routing_model(config, request.model)
         return Denied(state=_count_routing(state, model, "exhausted"), failure=exhausted())
     fallback_transition: Final = (
@@ -303,6 +352,11 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         pinned_upstream=session.pinned_upstream if session is not None else None,
         dialogue_pins=session.dialogue_pins if session is not None else (),
     )
+    health: Final = next(h for h in current.health if h.resource == resource.id)
+    recovery_from: Final = (
+        health.status if not config.is_fallback(resource.id) and health.status in ("cooldown", "disabled") else None
+    )
+    upstream_ids: Final = config.upstream_deployments(resource.upstream_id)
     operation: Final = Operation(
         id=request.operation,
         logical=logical,
@@ -310,7 +364,8 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         generation=bound.generation,
         resource=resource.id,
         heartbeat=now,
-        health_generation=next(h.generation for h in current.health if h.resource == resource.id),
+        health_generation=request.operation if recovery_from is not None else health.generation,
+        recovery_from=recovery_from,
         counted=not request.needs_count,
         fallback_transition_model=_routing_model(config, request.model) if fallback_transition else None,
         pending_pin=resource.upstream_id if request.pin_upstream else None,
@@ -325,6 +380,12 @@ def acquire(state: Snapshot, config: PoolConfig, request: Admission, now: float)
         update={
             "sessions": (*tuple(s for s in current.sessions if s.client != request.client), bound),
             "operations": (*current.operations, operation),
+            "health": tuple(
+                h.model_copy(update={"status": "probing", "generation": operation.id})
+                if recovery_from is not None and h.resource in upstream_ids
+                else h
+                for h in current.health
+            ),
             "charges": (
                 *current.charges,
                 *client_charge,
@@ -411,9 +472,19 @@ def _pin_dialogue(session: Session, active: Operation, now: float) -> Session:
     )
 
 
-def start(state: Snapshot, operation: str, now: float) -> Snapshot:
+def start(state: Snapshot, operation: str, now: float, config: PoolConfig | None = None) -> Snapshot:
     active: Final = next((op for op in state.operations if op.id == operation), None)
     if active is None or active.quarantined or not active.counted:
+        return state
+    resource: Final = next((r for r in config.resources if r.id == active.resource), None) if config else None
+    if (resource is not None and _dario_unavailable(state, resource, now)) or any(
+        h.resource == active.resource and h.account_on_hold for h in state.health
+    ):
+        return state
+    if active.recovery_from is not None and not any(
+        h.resource == active.resource and h.status == "probing" and h.generation == active.health_generation
+        for h in state.health
+    ):
         return state
     if active.pending_pin is not None and not any(
         s.client == active.client and s.generation == active.generation and s.resource is not None
@@ -456,7 +527,13 @@ def quarantine(state: Snapshot, operation: str) -> Snapshot:
 
 
 def complete(
-    state: Snapshot, config: PoolConfig, operation: str, now: float, actual_tokens: int | None = None
+    state: Snapshot,
+    config: PoolConfig,
+    operation: str,
+    now: float,
+    actual_tokens: int | None = None,
+    *,
+    successful: bool = True,
 ) -> Snapshot:
     active: Final = next((op for op in state.operations if op.id == operation), None)
     if active is None:
@@ -473,7 +550,7 @@ def complete(
             "sessions": tuple(_finish_session(s, active, client_still_active, now) for s in state.sessions),
             "charges": tuple(_settle(c, active, resource, now, actual_tokens) for c in state.charges),
             "health": tuple(
-                _released_probe(_successful_health(h, active, resource, upstream_ids, now), active)
+                _released_probe(_successful_health(h, active, resource, upstream_ids, now) if successful else h, active)
                 for h in state.health
             ),
         }
@@ -527,15 +604,27 @@ def abort(state: Snapshot, config: PoolConfig, operation: str, now: float) -> Sn
 
 
 def _released_probe(health: Health, operation: Operation) -> Health:
-    if operation.probe and health.status == "probing" and health.generation == operation.health_generation:
-        return health.model_copy(update={"status": "cooldown"})
+    if health.status == "probing" and health.generation == operation.health_generation:
+        if operation.recovery_from is not None:
+            return health.model_copy(update={"status": operation.recovery_from})
+        if operation.probe:
+            return health.model_copy(update={"status": "cooldown"})
     return health
 
 
 def _successful_health(
     health: Health, operation: Operation, resource: Resource, upstream_ids: frozenset[str], now: float
 ) -> Health:
-    if health.resource not in upstream_ids or health.status != "ready" or operation.probe:
+    if health.resource not in upstream_ids or operation.probe or health.account_on_hold:
+        return health
+    if (
+        health.status == "probing"
+        and operation.recovery_from is not None
+        and operation.started
+        and health.generation == operation.health_generation
+    ):
+        return health.model_copy(update={"status": "ready", "success_since": now, "capacity": None, "retry_at": 0})
+    if health.status != "ready":
         return health
     successful_since: Final = health.success_since if health.success_since is not None else now
     limit: Final = resource.limits.parallel
@@ -553,7 +642,7 @@ def reject(state: Snapshot, config: PoolConfig, operation: str, now: float) -> S
     if active is None:
         return state
     remaining: Final = tuple(op for op in state.operations if op.id != operation)
-    finished: Final = complete(state, config, operation, now, actual_tokens=0)
+    finished: Final = complete(state, config, operation, now, actual_tokens=0, successful=False)
     return finished.model_copy(
         update={
             "sessions": tuple(
@@ -604,7 +693,9 @@ def sweep(state: Snapshot, config: PoolConfig, now: float) -> Snapshot:
         recovered.model_copy(
             update={
                 "health": tuple(
-                    Health(resource=h.resource) if config.is_fallback(h.resource) and h.status != "ready" else h
+                    Health(resource=h.resource)
+                    if config.is_fallback(h.resource) and h.status != "ready" and not h.account_on_hold
+                    else h
                     for h in recovered.health
                 ),
             }

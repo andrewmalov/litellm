@@ -152,42 +152,29 @@ async def test_first_device_race_shares_key_assignment_and_lost_state_never_boot
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ("cooldown", "disabled"))
-async def test_only_one_recovery_worker_can_generate_a_probe(store: RedisPoolStore, status: str) -> None:
-    from litellm.router_utils.exclusive_pool.request import Ticket
+async def test_recovery_is_idle_until_one_coordinator_gets_a_client_request(store: RedisPoolStore) -> None:
     from litellm.router_utils.exclusive_pool.worker import RecoveryWorker
 
-    entered: Final = asyncio.Event()
-    release: Final = asyncio.Event()
     await store.transact(
         lambda snapshot, now: snapshot.model_copy(
             update={
                 "health": tuple(
-                    h.model_copy(update={"status": status}) if h.resource == "a" else h for h in snapshot.health
+                    h.model_copy(update={"status": "cooldown"}) if h.resource == "a" else h for h in snapshot.health
                 )
             }
         )
     )
-
-    async def probe(ticket: Ticket) -> bool:
-        assert ticket.resource == "a"
-        assert not entered.is_set(), "two independent workers generated on the same resource"
-        entered.set()
-        await release.wait()
-        return True
-
-    left: Final = RecoveryWorker(store, probe)
-    right: Final = RecoveryWorker(RedisPoolStore(store.redis, store.config), probe)
-    running: Final = asyncio.create_task(left.tick("a"))
-    await asyncio.wait_for(entered.wait(), timeout=5)
-    try:
-        await right.tick("a")
-    finally:
-        release.set()
-        await running
-    recovered: Final = await store.read()
-    assert not isinstance(recovered, Failure)
-    assert recovered.health[0].status == "ready"
+    await RecoveryWorker(store).cycle()
+    idle: Final = await store.read()
+    assert not isinstance(idle, Failure)
+    assert not idle.operations and idle.health[0].status == "cooldown"
+    peer: Final = RedisPoolStore(store.redis, store.config)
+    replies: Final = await asyncio.gather(
+        store.acquire(Admission(client="same", device="left", operation="left", tokens=1, eligible=("a",))),
+        peer.acquire(Admission(client="same", device="right", operation="right", tokens=1, eligible=("a",))),
+    )
+    assert sum(isinstance(reply, Granted) for reply in replies) == 1
+    assert sum(isinstance(reply, Denied) for reply in replies) == 1
 
 
 @pytest.mark.asyncio

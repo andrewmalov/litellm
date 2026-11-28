@@ -41,7 +41,6 @@ class Ticket(FrozenModel):
     requires_binding: bool = False
     dialogue: str | None = None
     anthropic: bool = False
-    probe: bool = False
     tokens: int = 1
     limits: Limits | None = None
 
@@ -196,10 +195,6 @@ def _supported_block(block: Mapping[str, JsonValue], allowed: tuple[str, ...] | 
             return True
         case _:
             return False
-
-
-def recovery_request(model: str) -> RequestView:
-    return RequestView(model=model, messages=({"role": "user", "content": "Reply with OK"},), max_tokens=1)
 
 
 def safe_id(pool: str, value: str) -> str:

@@ -195,6 +195,7 @@ class Operation(FrozenModel):
     started: bool = False
     quarantined: bool = False
     probe: bool = False
+    recovery_from: Literal["cooldown", "disabled"] | None = None
     health_generation: str = "initial"
     fallback_transition_model: str | None = None
 
@@ -207,6 +208,13 @@ class Charge(FrozenModel):
     settled_at: float | None = None
 
 
+class DarioHealth(FrozenModel):
+    upstream: str
+    observed_at: Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    status: Literal["ok", "unavailable", "rate_limited", "oauth_refreshed", "account_on_hold"]
+    retry_at: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 0
+
+
 class Health(FrozenModel):
     resource: str
     status: Literal["ready", "cooldown", "probing", "disabled"] = "ready"
@@ -214,6 +222,8 @@ class Health(FrozenModel):
     cycles: int = 0
     generation: str = "initial"
     success_since: float | None = None
+    failed_at: float | None = None
+    account_on_hold: bool = False
     capacity: int | None = None
 
 
@@ -248,6 +258,7 @@ class Snapshot(FrozenModel):
     operations: tuple[Operation, ...] = ()
     charges: tuple[Charge, ...] = ()
     health: tuple[Health, ...] = ()
+    dario_health: tuple[DarioHealth, ...] = ()
     events: tuple[Event, ...] = ()
     routing_counters: tuple[RoutingCounters, ...] = ()
 

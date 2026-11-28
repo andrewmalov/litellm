@@ -13,7 +13,7 @@ from litellm.router_utils.exclusive_pool.models import (
     PoolConfig,
     Snapshot,
 )
-from litellm.router_utils.exclusive_pool.recovery import ErrorPolicy, claim_probe, enable, fail, probe_success
+from litellm.router_utils.exclusive_pool.recovery import ErrorPolicy, enable, fail
 from litellm.router_utils.exclusive_pool.state import acquire, complete, empty_state, quarantine, start
 
 
@@ -209,7 +209,13 @@ def test_failed_model_does_not_release_a_running_sibling_or_admit_probes() -> No
     )
     assert all(h.status == "cooldown" for h in failed.health if h.resource.startswith("a-"))
     assert not isinstance(_admit(failed, "one", "haiku", "switch", 4), Granted)
-    assert not isinstance(claim_probe(failed, config.resolve(failed), "a-haiku", "probe", 20), Granted)
+    blocked: Final = acquire(
+        failed,
+        config.resolve(failed),
+        Admission(client="other", device="d", operation="recover", tokens=1, eligible=("a-haiku",)),
+        20,
+    )
+    assert not isinstance(blocked, Granted)
     other: Final = _admit(failed, "two", "haiku", "other", 4)
     assert isinstance(other, Granted) and other.resource == "b-haiku"
     ended: Final = complete(failed, config.resolve(failed), "second", 5)
@@ -255,10 +261,10 @@ def test_recovery_generations_and_subsequent_disable_are_shared_by_all_models() 
     cooled: Final = fail(
         first.state, config.resolve(first.state), "first", ErrorPolicy(kind="cooldown", confirmed_end=True), 3, 0
     )
-    probe: Final = claim_probe(cooled, config.resolve(cooled), "a-opus", "probe", 19)
+    probe: Final = _admit(cooled, "two", "opus", "probe", 19)
     assert isinstance(probe, Granted)
     assert all(h.status == "probing" and h.generation == "probe" for h in probe.state.health)
-    recovered: Final = probe_success(probe.state, config.resolve(probe.state), "probe", 20)
+    recovered: Final = complete(start(probe.state, "probe", 19), config.resolve(probe.state), "probe", 20)
     assert all(h.status == "ready" and h.generation == "probe" for h in recovered.health)
     second: Final = _admit(recovered, "two", "opus", "second", 21)
     assert isinstance(second, Granted)
@@ -266,7 +272,7 @@ def test_recovery_generations_and_subsequent_disable_are_shared_by_all_models() 
         second.state, config.resolve(second.state), "second", ErrorPolicy(kind="disabled", confirmed_end=True), 22, 0
     )
     assert all(h.status == "disabled" for h in disabled.health)
-    assert not isinstance(claim_probe(disabled, config.resolve(disabled), "a-sonnet", "bypass", 23), Granted)
+    assert not isinstance(_admit(disabled, "two", "sonnet", "bypass", 23), Granted)
     enabled: Final = enable(disabled, "a-sonnet", "operator")
     assert all(h.status == "cooldown" and h.generation == "operator" for h in enabled.health)
 
@@ -423,15 +429,19 @@ def test_unmarked_database_rows_with_null_metadata_do_not_disable_discovery() ->
 
 
 def test_removed_resource_cannot_be_probed() -> None:
-    from litellm.router_utils.exclusive_pool.recovery import claim_probe
-
     config: Final = _config()
     original: Final = _reconcile(empty_state(config), config, (_row("a"),), 1)
     removed: Final = _reconcile(original, config, (), 2)
     cooled: Final = removed.model_copy(
         update={"health": tuple(h.model_copy(update={"status": "cooldown"}) for h in removed.health)}
     )
-    assert not isinstance(claim_probe(cooled, config.resolve(cooled), "a", "probe", 3), Granted)
+    result: Final = acquire(
+        cooled,
+        config.resolve(cooled),
+        Admission(client="c", device="d", operation="recover", tokens=1, eligible=("a",)),
+        3,
+    )
+    assert not isinstance(result, Granted)
 
 
 def test_blocked_deployments_are_drained_and_cannot_receive_new_clients() -> None:

@@ -5,15 +5,19 @@ import asyncio
 import os
 import sys
 import uuid
+from functools import reduce
 from pathlib import Path
 from typing import Final
 
+from pydantic import TypeAdapter, ValidationError
 from redis.asyncio import Redis
 
-from .models import CatalogEntry, Denied, Failure, FrozenModel, Health, PoolConfig, Snapshot
-from .recovery import enable
+from .models import CatalogEntry, DarioHealth, Denied, Failure, FrozenModel, Health, PoolConfig, Snapshot
+from .recovery import enable, record_dario_health
 from .state import abort, complete, unavailable
 from .store import RedisPoolStore
+
+_DARIO_REPORTS: Final = TypeAdapter(tuple[DarioHealth, ...])
 
 
 def confirm_idle(snapshot: Snapshot, config: PoolConfig, operation: str, now: float) -> Snapshot | Denied:
@@ -27,7 +31,11 @@ def confirm_idle(snapshot: Snapshot, config: PoolConfig, operation: str, now: fl
                 code="routing_state_unavailable", status=409, message="The operation still has a live heartbeat"
             ),
         )
-    return complete(snapshot, config, operation, now) if active.started else abort(snapshot, config, operation, now)
+    return (
+        complete(snapshot, config, operation, now, successful=False)
+        if active.started
+        else abort(snapshot, config, operation, now)
+    )
 
 
 def reconfigure(snapshot: Snapshot, config: PoolConfig, previous: PoolConfig | None = None) -> Snapshot | Denied:
@@ -97,7 +105,8 @@ async def run(command: str, operation: str, resource: str, previous_config: str 
                 sys.stdout.write(failure.model_dump_json() + "\n")
                 return 1
             case Snapshot():
-                sys.stdout.write(result.model_dump_json() + "\n")
+                if command != "dario-health":
+                    sys.stdout.write(result.model_dump_json() + "\n")
                 return 0
     finally:
         await client.close()
@@ -111,6 +120,21 @@ async def _command(
             return await store.initialize()
         case "status":
             return await store.read()
+        case "dario-health":
+            try:
+                reports: Final = _DARIO_REPORTS.validate_json(sys.stdin.read())
+            except ValidationError:
+                return Failure(code="unsupported_pool_request", status=400, message="Invalid Dario health snapshot")
+            generation: Final = uuid.uuid4().hex
+            return await store.transact(
+                lambda snapshot, now: reduce(
+                    lambda current, report: record_dario_health(
+                        current, store.config.resolve(snapshot), report, now, generation
+                    ),
+                    sorted(reports, key=lambda report: report.observed_at),
+                    snapshot,
+                )
+            )
         case "confirm":
             return await store.transact(
                 lambda snapshot, now: confirm_idle(snapshot, store.config.resolve(snapshot), operation, now)
@@ -136,6 +160,7 @@ def main() -> int:
     parser: Final = argparse.ArgumentParser(description="Manage exclusive endpoint pool coordination state")
     commands: Final = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
+    commands.add_parser("dario-health")
     commands.add_parser("init").add_argument("--confirm-upstream-idle", required=True, action="store_true")
     confirm: Final = commands.add_parser("confirm")
     confirm.add_argument("--confirm-upstream-idle", required=True, action="store_true")

@@ -390,7 +390,7 @@ def test_completed_stream_releases_its_inflight_slot(rig: Rig) -> None:
         rig.proxy.post("/key/delete", {"keys": [key]})
 
 
-def test_confirmed_failure_moves_next_request_and_actual_generation_probe_recovers_resource(rig: Rig) -> None:
+def test_confirmed_failure_recovers_only_on_a_later_client_request(rig: Rig) -> None:
     key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
     rig.fail_primary.set()
     try:
@@ -401,7 +401,15 @@ def test_confirmed_failure_moves_next_request_and_actual_generation_probe_recove
         assert moved.status_code == 200, moved.text
         assert moved.headers["x-litellm-model-id"] == rig.config.primaries[1].id
         assert rig.calls.get(timeout=5) == rig.config.primaries[1].id
-        assert rig.calls.get(timeout=25) == rig.config.primaries[0].id
+        with pytest.raises(queue.Empty):
+            rig.calls.get(timeout=20)
+        other_key: Final = str(rig.proxy.post("/key/generate", {"models": list(rig.config.models)})["key"])
+        try:
+            restored: Final = rig.chat(other_key, "device")
+            assert restored.status_code == 200, restored.text
+            assert rig.calls.get(timeout=5) == rig.config.primaries[0].id
+        finally:
+            rig.proxy.post("/key/delete", {"keys": [other_key]})
         repeated: Final = rig.chat(key, "device")
         assert repeated.status_code == 200, repeated.text
         assert repeated.headers["x-litellm-model-id"] == rig.config.primaries[1].id
